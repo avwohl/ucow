@@ -1,0 +1,35 @@
+# Record pointer test
+
+record Point is
+    x: uint16;
+    y: uint16;
+end record;
+
+var p: Point;
+var ptr: [Point];
+
+sub print_point(pt: [Point]) is
+    print("(");
+    print_i16(pt.x);
+    print(", ");
+    print_i16(pt.y);
+    print(")");
+end sub;
+
+sub set_point(pt: [Point], newx: uint16, newy: uint16) is
+    pt.x := newx;
+    pt.y := newy;
+end sub;
+
+p.x := 5;
+p.y := 10;
+ptr := &p;
+
+print("Via pointer: ");
+print_point(ptr);
+print_nl();
+
+set_point(ptr, 100, 200);
+print("After set: ");
+print_point(&p);
+print_nl();

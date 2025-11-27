@@ -1,0 +1,28 @@
+# Test forward declarations with @decl/@impl
+
+include "fwddecl.coh";
+
+# Implementation of add_nums
+@impl sub add_nums is
+    result := a + b;
+end sub;
+
+# Implementation of multiply
+@impl sub multiply is
+    result := x * y;
+end sub;
+
+var sum: uint16;
+var prod: uint16;
+
+print("Forward declaration test:\r\n");
+
+sum := add_nums(10, 25);
+print("10 + 25 = ");
+print_i16(sum);
+print_nl();
+
+prod := multiply(6, 7);
+print("6 * 7 = ");
+print_i16(prod);
+print_nl();

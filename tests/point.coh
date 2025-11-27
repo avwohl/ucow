@@ -1,0 +1,14 @@
+# Point record definition
+
+record Point is
+    x: uint16;
+    y: uint16;
+end record;
+
+sub print_point(pt: [Point]) is
+    print("(");
+    print_i16(pt.x);
+    print(", ");
+    print_i16(pt.y);
+    print(")");
+end sub;

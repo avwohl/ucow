@@ -1,0 +1,7 @@
+# Simplest test - just declare and assign variables
+
+var a: uint16 := 10;
+var b: uint16 := 20;
+var c: uint16;
+
+c := a + b;

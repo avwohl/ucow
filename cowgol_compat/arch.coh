@@ -1,0 +1,3 @@
+# Architecture configuration for 8080/Z80 CP/M
+# 8080 is a 16-bit architecture
+include "arch16bit.coh";

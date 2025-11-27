@@ -1,0 +1,254 @@
+# sym:[Symbol]
+sub WriteMid1 implements MidWriter is
+	E_b16(node.asmsymbol.sym.vardata.subr.id);
+	E_b8(node.asmsymbol.sym.vardata.wsid);
+	E_bsize(node.asmsymbol.sym.vardata.offset);
+	E_b8(node.asmsymbol.sym.vardata.type.width as uint8);
+end sub;
+# value:int32:falselabel:uint16
+sub WriteMid2 implements MidWriter is
+	E_b32(node.whencase.value as uint32);
+	E_b16(node.whencase.falselabel);
+end sub;
+# text:string
+sub WriteMid3 implements MidWriter is
+	E_countedstring(node.initstring.text);
+end sub;
+# truelabel:LabelRef:falselabel:LabelRef:fallthrough:LabelRef:negated:uint8
+sub WriteMid4 implements MidWriter is
+	E_b16(node.bltu.truelabel);
+	E_b16(node.bltu.falselabel);
+	E_b16(node.bltu.fallthrough);
+	E_b8(node.bltu.negated);
+end sub;
+# sym:[Symbol]:off:Size
+sub WriteMid5 implements MidWriter is
+	E_b16(node.initaddress.sym.vardata.subr.id);
+	E_b8(node.initaddress.sym.vardata.wsid);
+	E_bsize(node.initaddress.sym.vardata.offset);
+	E_b8(node.initaddress.sym.vardata.type.width as uint8);
+	E_bsize(node.initaddress.off);
+end sub;
+# 
+sub WriteMid6 implements MidWriter is
+end sub;
+# subr:[Subroutine]:sym:[Symbol]:remaining:uint8
+sub WriteMid7 implements MidWriter is
+	E_b16(node.poparg.subr.id);
+	E_b16(node.poparg.sym.vardata.subr.id);
+	E_b8(node.poparg.sym.vardata.wsid);
+	E_bsize(node.poparg.sym.vardata.offset);
+	E_b8(node.poparg.sym.vardata.type.width as uint8);
+	E_b8(node.poparg.remaining);
+end sub;
+# sext:uint8
+sub WriteMid8 implements MidWriter is
+	E_b8(node.cast4.sext);
+end sub;
+# label:uint16
+sub WriteMid9 implements MidWriter is
+	E_b16(node.label.label);
+end sub;
+# value:int32
+sub WriteMid10 implements MidWriter is
+	E_b32(node.init.value as uint32);
+end sub;
+# subr:[Subroutine]
+sub WriteMid11 implements MidWriter is
+	E_b16(node.call.subr.id);
+end sub;
+var writers: MidWriter[] := {
+	WriteMid1,
+	WriteMid2,
+	WriteMid3,
+	WriteMid4,
+	WriteMid5,
+	WriteMid6,
+	WriteMid7,
+	WriteMid8,
+	WriteMid9,
+	WriteMid10,
+	WriteMid11,
+};
+var signatures: uint8[] := {
+	5, # END
+	5, # STARTFILE
+	5, # ENDFILE
+	10, # STARTSUB
+	10, # ENDSUB
+	0, # STARTINIT
+	9, # INIT0
+	9, # INIT1
+	9, # INIT2
+	9, # INIT4
+	9, # INIT8
+	2, # INITSTRING
+	4, # INITADDRESS
+	10, # INITSUBREF
+	5, # ENDINIT
+	5, # ASMGROUPSTART
+	5, # ASMGROUPEND
+	5, # ASMSTART
+	2, # ASMTEXT
+	0, # ASMSYMBOL
+	10, # ASMSUBREF
+	9, # ASMVALUE
+	5, # ASMEND
+	5, # FALLBACK
+	5, # PAIR
+	8, # LABEL
+	8, # JUMP
+	5, # RETURN
+	10, # CALL
+	6, # ARG0
+	6, # ARG1
+	6, # ARG2
+	6, # ARG4
+	6, # ARG8
+	6, # POPARG0
+	6, # POPARG1
+	6, # POPARG2
+	6, # POPARG4
+	6, # POPARG8
+	9, # CONSTANT
+	2, # STRING
+	4, # ADDRESS
+	10, # SUBREF
+	5, # DEREF0
+	5, # DEREF1
+	5, # DEREF2
+	5, # DEREF4
+	5, # DEREF8
+	5, # STORE0
+	5, # STORE1
+	5, # STORE2
+	5, # STORE4
+	5, # STORE8
+	3, # BAND
+	3, # BOR
+	3, # BEQ0
+	3, # BEQ1
+	3, # BEQ2
+	3, # BEQ4
+	3, # BEQ8
+	3, # BLTS0
+	3, # BLTS1
+	3, # BLTS2
+	3, # BLTS4
+	3, # BLTS8
+	3, # BLTU0
+	3, # BLTU1
+	3, # BLTU2
+	3, # BLTU4
+	3, # BLTU8
+	5, # STARTCASE0
+	5, # STARTCASE1
+	5, # STARTCASE2
+	5, # STARTCASE4
+	5, # STARTCASE8
+	1, # WHENCASE0
+	1, # WHENCASE1
+	1, # WHENCASE2
+	1, # WHENCASE4
+	1, # WHENCASE8
+	5, # ENDCASE0
+	5, # ENDCASE1
+	5, # ENDCASE2
+	5, # ENDCASE4
+	5, # ENDCASE8
+	7, # CAST10
+	7, # CAST11
+	7, # CAST12
+	7, # CAST14
+	7, # CAST18
+	7, # CAST20
+	7, # CAST21
+	7, # CAST22
+	7, # CAST24
+	7, # CAST28
+	7, # CAST40
+	7, # CAST41
+	7, # CAST42
+	7, # CAST44
+	7, # CAST48
+	7, # CAST80
+	7, # CAST81
+	7, # CAST82
+	7, # CAST84
+	7, # CAST88
+	5, # NOT0
+	5, # NOT1
+	5, # NOT2
+	5, # NOT4
+	5, # NOT8
+	5, # NEG0
+	5, # NEG1
+	5, # NEG2
+	5, # NEG4
+	5, # NEG8
+	5, # LSHIFT0
+	5, # LSHIFT1
+	5, # LSHIFT2
+	5, # LSHIFT4
+	5, # LSHIFT8
+	5, # RSHIFTU0
+	5, # RSHIFTU1
+	5, # RSHIFTU2
+	5, # RSHIFTU4
+	5, # RSHIFTU8
+	5, # RSHIFTS0
+	5, # RSHIFTS1
+	5, # RSHIFTS2
+	5, # RSHIFTS4
+	5, # RSHIFTS8
+	5, # SUB0
+	5, # SUB1
+	5, # SUB2
+	5, # SUB4
+	5, # SUB8
+	5, # DIVU0
+	5, # DIVU1
+	5, # DIVU2
+	5, # DIVU4
+	5, # DIVU8
+	5, # DIVS0
+	5, # DIVS1
+	5, # DIVS2
+	5, # DIVS4
+	5, # DIVS8
+	5, # REMU0
+	5, # REMU1
+	5, # REMU2
+	5, # REMU4
+	5, # REMU8
+	5, # REMS0
+	5, # REMS1
+	5, # REMS2
+	5, # REMS4
+	5, # REMS8
+	5, # ADD0
+	5, # ADD1
+	5, # ADD2
+	5, # ADD4
+	5, # ADD8
+	5, # MUL0
+	5, # MUL1
+	5, # MUL2
+	5, # MUL4
+	5, # MUL8
+	5, # AND0
+	5, # AND1
+	5, # AND2
+	5, # AND4
+	5, # AND8
+	5, # OR0
+	5, # OR1
+	5, # OR2
+	5, # OR4
+	5, # OR8
+	5, # EOR0
+	5, # EOR1
+	5, # EOR2
+	5, # EOR4
+	5, # EOR8
+};

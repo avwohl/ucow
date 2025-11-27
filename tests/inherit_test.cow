@@ -1,0 +1,35 @@
+# Test record inheritance
+
+record Base is
+    x: uint16;
+    y: uint16;
+end record;
+
+record Derived: Base is
+    z: uint16;
+end record;
+
+var b: Base;
+var d: Derived;
+
+b.x := 1;
+b.y := 2;
+
+d.x := 10;
+d.y := 20;
+d.z := 30;
+
+print("Record inheritance test:\r\n");
+print("Base: x=");
+print_i16(b.x);
+print(" y=");
+print_i16(b.y);
+print_nl();
+
+print("Derived: x=");
+print_i16(d.x);
+print(" y=");
+print_i16(d.y);
+print(" z=");
+print_i16(d.z);
+print_nl();

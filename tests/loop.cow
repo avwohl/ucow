@@ -1,0 +1,32 @@
+# Loop test
+
+var i: uint8;
+
+sub test_while() is
+    print("While loop (1-5): ");
+    i := 1;
+    while i <= 5 loop
+        print_i8(i);
+        print(" ");
+        i := i + 1;
+    end loop;
+    print_nl();
+end sub;
+
+sub test_loop_break() is
+    print("Loop with break (1-3): ");
+    i := 1;
+    loop
+        print_i8(i);
+        print(" ");
+        i := i + 1;
+        if i > 3 then
+            break;
+        end if;
+    end loop;
+    print_nl();
+end sub;
+
+test_while();
+test_loop_break();
+print("Done.\r\n");

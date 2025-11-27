@@ -1,0 +1,19 @@
+# Test @at union fields
+
+record Value is
+    as_int @(0): uint16;
+    as_bytes @(0): uint8;
+end record;
+
+var v: Value;
+
+print("Union test:\r\n");
+
+v.as_int := 0x1234;
+print("Set as_int to 0x1234\r\n");
+print("as_int: ");
+print_hex_i16(v.as_int);
+print_nl();
+print("as_bytes (low byte): ");
+print_i8(v.as_bytes);
+print_nl();

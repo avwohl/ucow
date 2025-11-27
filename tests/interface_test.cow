@@ -1,0 +1,26 @@
+# Test interfaces (function pointers)
+
+interface Printer(value: uint16);
+
+sub print_decimal(value: uint16) implements Printer is
+    print_i16(value);
+end sub;
+
+sub print_hex(value: uint16) implements Printer is
+    print("0x");
+    print_hex_i16(value);
+end sub;
+
+var my_printer: Printer;
+
+print("Interface test:\r\n");
+
+my_printer := print_decimal;
+print("Decimal: ");
+my_printer(42);
+print_nl();
+
+my_printer := print_hex;
+print("Hex: ");
+my_printer(255);
+print_nl();

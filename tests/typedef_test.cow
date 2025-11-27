@@ -1,0 +1,23 @@
+# Test typedefs
+
+typedef byte is uint8;
+typedef word is uint16;
+typedef string is [uint8];
+
+var b: byte;
+var w: word;
+var s: string;
+
+b := 42;
+w := 1234;
+s := "Hello typedef!";
+
+print("Typedef test:\r\n");
+print("b = ");
+print_i8(b);
+print_nl();
+print("w = ");
+print_i16(w);
+print_nl();
+print(s);
+print_nl();

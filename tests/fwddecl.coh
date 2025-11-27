@@ -1,0 +1,4 @@
+# Forward declaration header
+
+@decl sub add_nums(a: uint16, b: uint16): (result: uint16);
+@decl sub multiply(x: uint16, y: uint16): (result: uint16);

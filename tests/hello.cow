@@ -1,0 +1,5 @@
+# Simple hello world test
+
+var msg: [uint8] := "Hello, World!\r\n";
+
+print(msg);

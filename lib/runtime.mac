@@ -1,0 +1,411 @@
+; ucow runtime library for 8080/CP/M
+; This file is included in generated assembly
+
+; ============================================================
+; BDOS interface
+; ============================================================
+
+BDOS    EQU     5
+CONOUT  EQU     2
+PRTSTR  EQU     9
+
+; ============================================================
+; Console output
+; ============================================================
+
+; Print character in A
+print_char:
+        PUSH    B
+        PUSH    D
+        PUSH    H
+        MOV     E,A
+        MVI     C,CONOUT
+        CALL    BDOS
+        POP     H
+        POP     D
+        POP     B
+        RET
+
+; Print string pointed to by HL (null-terminated)
+print:
+        PUSH    B
+        PUSH    D
+        PUSH    H
+_prlp:  MOV     A,M
+        ORA     A
+        JZ      _prdn
+        PUSH    H
+        MOV     E,A
+        MVI     C,CONOUT
+        CALL    BDOS
+        POP     H
+        INX     H
+        JMP     _prlp
+_prdn:  POP     H
+        POP     D
+        POP     B
+        RET
+
+; Print newline
+print_nl:
+        MVI     A,13
+        CALL    print_char
+        MVI     A,10
+        CALL    print_char
+        RET
+
+; Print 8-bit unsigned in A
+print_i8:
+        PUSH    B
+        PUSH    D
+        PUSH    H
+        MVI     H,0
+        MOV     L,A
+        CALL    print_i16
+        POP     H
+        POP     D
+        POP     B
+        RET
+
+; Print 16-bit unsigned in HL
+print_i16:
+        PUSH    B
+        PUSH    D
+        PUSH    H
+
+        ; Convert to decimal string
+        ; Use B to track buffer position (offset from _numbuf)
+        MVI     B,5             ; Start at end of buffer
+        LXI     D,_numbuf
+        MVI     A,0
+        PUSH    D
+        LXI     D,5
+        DAD     D               ; HL = _numbuf + 5, but we need to restore HL
+        POP     D
+        ; Restore HL from stack
+        POP     H
+        PUSH    H
+
+        ; Store null terminator
+        PUSH    H               ; Save value
+        LXI     H,_numbuf+5
+        MVI     M,0
+        POP     H               ; Restore value to divide
+
+_p16lp: ; Divide HL by 10
+        PUSH    B               ; Save buffer index
+        LXI     D,10
+        CALL    _div16          ; HL = quotient, DE = remainder
+
+        ; Store digit
+        MOV     A,E
+        ADI     '0'
+        POP     B               ; Restore buffer index
+        DCR     B               ; Move back one position
+        PUSH    H               ; Save quotient
+        MVI     H,0
+        MOV     L,B
+        LXI     D,_numbuf
+        DAD     D               ; HL = _numbuf + B
+        MOV     M,A             ; Store digit
+        POP     H               ; Restore quotient
+
+        ; Check if quotient is zero
+        MOV     A,H
+        ORA     L
+        JNZ     _p16lp
+
+        ; Print the string starting at _numbuf+B
+        MVI     H,0
+        MOV     L,B
+        LXI     D,_numbuf
+        DAD     D
+        CALL    print
+
+        POP     H
+        POP     D
+        POP     B
+        RET
+
+; Print 16-bit hex in HL
+print_hex_i16:
+        PUSH    H
+        MOV     A,H
+        CALL    _prhex
+        POP     H
+        MOV     A,L
+        CALL    _prhex
+        RET
+
+_prhex: PUSH    PSW
+        RRC
+        RRC
+        RRC
+        RRC
+        CALL    _prnib
+        POP     PSW
+_prnib: ANI     0FH
+        CPI     10
+        JC      _prdig
+        ADI     'A'-10
+        JMP     print_char
+_prdig: ADI     '0'
+        JMP     print_char
+
+; ============================================================
+; 16-bit arithmetic
+; ============================================================
+
+; Multiply HL by DE, result in HL
+_mul16:
+        PUSH    B
+        PUSH    D
+
+        MOV     B,H
+        MOV     C,L             ; BC = multiplicand
+        LXI     H,0             ; HL = result
+
+_m16lp: MOV     A,D
+        ORA     E
+        JZ      _m16dn
+
+        MOV     A,E
+        RAR
+        JNC     _m16ns
+
+        DAD     B               ; Add multiplicand
+
+_m16ns: ; Shift multiplicand left
+        MOV     A,C
+        ADD     A
+        MOV     C,A
+        MOV     A,B
+        ADC     A
+        MOV     B,A
+
+        ; Shift multiplier right
+        MOV     A,D
+        ORA     A
+        RAR
+        MOV     D,A
+        MOV     A,E
+        RAR
+        MOV     E,A
+
+        JMP     _m16lp
+
+_m16dn: POP     D
+        POP     B
+        RET
+
+; Divide HL by DE (unsigned), quotient in HL, remainder in DE
+; (DE is overwritten with remainder)
+_div16:
+        PUSH    B
+
+        MOV     B,D
+        MOV     C,E             ; BC = divisor
+        LXI     D,0             ; DE = remainder
+        MVI     A,16            ; Loop counter
+
+_d16lp: PUSH    PSW
+
+        ; Shift HL left into DE
+        DAD     H
+        MOV     A,E
+        RAL
+        MOV     E,A
+        MOV     A,D
+        RAL
+        MOV     D,A
+
+        ; Try to subtract divisor
+        MOV     A,E
+        SUB     C
+        PUSH    PSW
+        MOV     A,D
+        SBB     B
+        JC      _d16ns
+
+        ; Subtraction succeeded
+        MOV     D,A
+        POP     PSW
+        MOV     E,A
+        INR     L               ; Set quotient bit
+        JMP     _d16nx
+
+_d16ns: POP     PSW             ; Discard
+
+_d16nx: POP     PSW
+        DCR     A
+        JNZ     _d16lp
+
+        POP     B
+        RET
+
+; Modulo: HL = HL mod DE
+_mod16:
+        CALL    _div16
+        XCHG                    ; Move remainder to HL
+        RET
+
+; Shift HL left by E positions
+_shl16:
+        MOV     A,E
+        ORA     A
+        RZ
+_sh16l: DAD     H
+        DCR     A
+        JNZ     _sh16l
+        RET
+
+; Shift HL right by E positions (logical)
+_shr16:
+        MOV     A,E
+        ORA     A
+        RZ
+_sh16r: MOV     A,H
+        ORA     A
+        RAR
+        MOV     H,A
+        MOV     A,L
+        RAR
+        MOV     L,A
+        DCR     E
+        JNZ     _sh16r
+        RET
+
+; ============================================================
+; 8-bit arithmetic
+; ============================================================
+
+; Multiply A by B, result in A
+_mul8:
+        PUSH    B
+        PUSH    D
+        MOV     C,A             ; C = multiplicand
+        XRA     A               ; A = result
+
+_m8lp:  MOV     D,B
+        ORA     D
+        JZ      _m8dn
+
+        MOV     A,B
+        RAR
+        JNC     _m8ns
+
+        MOV     A,C
+        ADD     D               ; Oops, need result in separate reg
+        MOV     D,A
+
+_m8ns:  ; Actually let's use a different approach
+        POP     D
+        POP     B
+        ; Simple loop multiply
+        PUSH    B
+        MOV     C,A
+        XRA     A
+_m8lp2: DCR     B
+        JM      _m8dn2
+        ADD     C
+        JMP     _m8lp2
+_m8dn2: POP     B
+        RET
+
+_m8dn:  POP     D
+        POP     B
+        RET
+
+; Divide A by B, quotient in A
+_div8:
+        PUSH    B
+        PUSH    D
+        MOV     C,B             ; Divisor in C
+        MVI     D,0             ; Remainder
+        MVI     B,8             ; Counter
+
+_d8lp:  ; Shift A left, high bit into D
+        ADD     A
+        MOV     E,A
+        MOV     A,D
+        RAL
+        MOV     D,A
+        MOV     A,E
+
+        ; Try subtract
+        PUSH    PSW
+        MOV     E,A
+        MOV     A,D
+        SUB     C
+        JC      _d8ns
+
+        MOV     D,A
+        MOV     A,E
+        INR     A               ; Set bit in quotient
+        JMP     _d8nx
+
+_d8ns:  POP     PSW
+        PUSH    PSW
+_d8nx:  POP     PSW
+        MOV     A,E
+        DCR     B
+        JNZ     _d8lp
+
+        POP     D
+        POP     B
+        RET
+
+; Modulo A by B, result in A
+_mod8:
+        PUSH    B
+        PUSH    D
+        CALL    _div8
+        MOV     A,D             ; Remainder
+        POP     D
+        POP     B
+        RET
+
+; ============================================================
+; Memory operations
+; ============================================================
+
+; MemSet: Fill memory at HL with A for BC bytes
+MemSet:
+        MOV     D,A
+_mslp:  MOV     A,B
+        ORA     C
+        RZ
+        MOV     M,D
+        INX     H
+        DCX     B
+        JMP     _mslp
+
+; MemZero: Zero memory at HL for BC bytes
+MemZero:
+        XRA     A
+        JMP     MemSet
+
+; ============================================================
+; Indirect call helper
+; ============================================================
+
+; Call address in HL (for interface/function pointer calls)
+_callhl:
+        PCHL            ; Jump to address in HL, return via RET in callee
+
+; ============================================================
+; Exit
+; ============================================================
+
+Exit:
+        JMP     0               ; Warm boot
+
+ExitWithError:
+        MVI     A,1
+        JMP     0               ; Warm boot (error code ignored in CP/M)
+
+; ============================================================
+; Data area
+; ============================================================
+
+_numbuf: DS      6              ; Buffer for number conversion

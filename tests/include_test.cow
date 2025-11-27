@@ -1,0 +1,21 @@
+# Test include system
+
+include "point.coh";
+
+var p1: Point;
+var p2: Point;
+
+p1.x := 10;
+p1.y := 20;
+
+p2.x := 100;
+p2.y := 200;
+
+print("Testing includes:\r\n");
+print("p1 = ");
+print_point(&p1);
+print_nl();
+print("p2 = ");
+print_point(&p2);
+print_nl();
+print("Done.\r\n");

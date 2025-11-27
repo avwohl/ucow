@@ -1,0 +1,48 @@
+# Arithmetic test
+
+var a: uint16 := 10;
+var b: uint16 := 3;
+var c: uint16;
+
+sub test_add() is
+    c := a + b;
+    print("10 + 3 = ");
+    print_i16(c);
+    print_nl();
+end sub;
+
+sub test_sub() is
+    c := a - b;
+    print("10 - 3 = ");
+    print_i16(c);
+    print_nl();
+end sub;
+
+sub test_mul() is
+    c := a * b;
+    print("10 * 3 = ");
+    print_i16(c);
+    print_nl();
+end sub;
+
+sub test_div() is
+    c := a / b;
+    print("10 / 3 = ");
+    print_i16(c);
+    print_nl();
+end sub;
+
+sub test_mod() is
+    c := a % b;
+    print("10 % 3 = ");
+    print_i16(c);
+    print_nl();
+end sub;
+
+print("Arithmetic tests:\r\n");
+test_add();
+test_sub();
+test_mul();
+test_div();
+test_mod();
+print("Done.\r\n");

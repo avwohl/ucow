@@ -1,0 +1,798 @@
+const MIDCODE_OR1 := 172;
+const MIDCODE_DEREF0 := 44;
+const MIDCODE_CAST10 := 86;
+const MIDCODE_STORE8 := 53;
+const MIDCODE_BEQ8 := 60;
+const MIDCODE_OR0 := 171;
+const MIDCODE_NOT2 := 108;
+const MIDCODE_STORE1 := 50;
+const MIDCODE_REMU8 := 150;
+const MIDCODE_SUB1 := 132;
+const MIDCODE_ASMSUBREF := 21;
+const MIDCODE_SUB4 := 134;
+const MIDCODE_REMS2 := 153;
+const MIDCODE_AND1 := 167;
+const MIDCODE_SUB8 := 135;
+const MIDCODE_REMU0 := 146;
+const MIDCODE_CAST88 := 105;
+const MIDCODE_REMU1 := 147;
+const MIDCODE_REMU4 := 149;
+const MIDCODE_CONSTANT := 40;
+const MIDCODE_ARG2 := 32;
+const MIDCODE_ENDINIT := 15;
+const MIDCODE_RSHIFTS2 := 128;
+const MIDCODE_ADD8 := 160;
+const MIDCODE_EOR1 := 177;
+const MIDCODE_DIVU8 := 140;
+const MIDCODE_EOR0 := 176;
+const MIDCODE_NOT1 := 107;
+const MIDCODE_ADD1 := 157;
+const MIDCODE_SUBREF := 43;
+const MIDCODE_RSHIFTS8 := 130;
+const MIDCODE_OR2 := 173;
+const MIDCODE_EOR8 := 180;
+const MIDCODE_AND2 := 168;
+const MIDCODE_ARG8 := 34;
+const MIDCODE_ASMGROUPSTART := 16;
+const MIDCODE_REMU2 := 148;
+const MIDCODE_BEQ2 := 58;
+const MIDCODE_CAST48 := 100;
+const MIDCODE_END := 1;
+const MIDCODE_MUL8 := 165;
+const MIDCODE_ENDCASE4 := 84;
+const MIDCODE_WHENCASE0 := 76;
+const MIDCODE_REMS1 := 152;
+const MIDCODE_BLTS0 := 61;
+const MIDCODE_CAST84 := 104;
+const MIDCODE_ARG1 := 31;
+const MIDCODE_CAST28 := 95;
+const MIDCODE_PAIR := 25;
+const MIDCODE_ASMVALUE := 22;
+const MIDCODE_CAST42 := 98;
+const MIDCODE_RSHIFTU1 := 122;
+const MIDCODE_STRING := 41;
+const MIDCODE_DEREF1 := 45;
+const MIDCODE_CAST80 := 101;
+const MIDCODE_RSHIFTU0 := 121;
+const MIDCODE_ENDCASE8 := 85;
+const MIDCODE_SUB2 := 133;
+const MIDCODE_CAST22 := 93;
+const MIDCODE_ADDRESS := 42;
+const MIDCODE_STARTFILE := 2;
+const MIDCODE_CAST20 := 91;
+const MIDCODE_LSHIFT0 := 116;
+const MIDCODE_BEQ0 := 56;
+const MIDCODE_POPARG2 := 37;
+const MIDCODE_AND4 := 169;
+const MIDCODE_DEREF2 := 46;
+const MIDCODE_DIVS1 := 142;
+const MIDCODE_CAST11 := 87;
+const MIDCODE_LSHIFT8 := 120;
+const MIDCODE_STORE4 := 52;
+const MIDCODE_MUL1 := 162;
+const MIDCODE_ADD0 := 156;
+const MIDCODE_CAST24 := 94;
+const MIDCODE_STARTCASE4 := 74;
+const MIDCODE_WHENCASE2 := 78;
+const MIDCODE_INIT0 := 7;
+const MIDCODE_BEQ4 := 59;
+const MIDCODE_BEQ1 := 57;
+const MIDCODE_BLTU0 := 66;
+const MIDCODE_INITADDRESS := 13;
+const MIDCODE_WHENCASE8 := 80;
+const MIDCODE_BLTS1 := 62;
+const MIDCODE_NOT4 := 109;
+const MIDCODE_BLTS2 := 63;
+const MIDCODE_ENDFILE := 3;
+const MIDCODE_CAST12 := 88;
+const MIDCODE_RSHIFTU4 := 124;
+const MIDCODE_EOR4 := 179;
+const MIDCODE_NOT0 := 106;
+const MIDCODE_DEREF8 := 48;
+const MIDCODE_EOR2 := 178;
+const MIDCODE_DIVU1 := 137;
+const MIDCODE_OR8 := 175;
+const MIDCODE_DEREF4 := 47;
+const MIDCODE_POPARG8 := 39;
+const MIDCODE_ENDCASE2 := 83;
+const MIDCODE_LSHIFT2 := 118;
+const MIDCODE_NEG1 := 112;
+const MIDCODE_LSHIFT1 := 117;
+const MIDCODE_STARTCASE0 := 71;
+const MIDCODE_CAST40 := 96;
+const MIDCODE_AND0 := 166;
+const MIDCODE_BLTU2 := 68;
+const MIDCODE_DIVS2 := 143;
+const MIDCODE_STARTCASE1 := 72;
+const MIDCODE_MUL2 := 163;
+const MIDCODE_STORE2 := 51;
+const MIDCODE_MUL0 := 161;
+const MIDCODE_STARTCASE2 := 73;
+const MIDCODE_ADD4 := 159;
+const MIDCODE_ADD2 := 158;
+const MIDCODE_REMS8 := 155;
+const MIDCODE_NEG2 := 113;
+const MIDCODE_ASMEND := 23;
+const MIDCODE_CAST82 := 103;
+const MIDCODE_CAST14 := 89;
+const MIDCODE_REMS0 := 151;
+const MIDCODE_NEG8 := 115;
+const MIDCODE_INIT2 := 9;
+const MIDCODE_DIVS8 := 145;
+const MIDCODE_DIVS4 := 144;
+const MIDCODE_BLTS8 := 65;
+const MIDCODE_MUL4 := 164;
+const MIDCODE_CAST81 := 102;
+const MIDCODE_ENDCASE0 := 81;
+const MIDCODE_DIVS0 := 141;
+const MIDCODE_DIVU4 := 139;
+const MIDCODE_DIVU2 := 138;
+const MIDCODE_DIVU0 := 136;
+const MIDCODE_BLTU1 := 67;
+const MIDCODE_RSHIFTS4 := 129;
+const MIDCODE_CAST18 := 90;
+const MIDCODE_POPARG0 := 35;
+const MIDCODE_ARG0 := 30;
+const MIDCODE_NEG0 := 111;
+const MIDCODE_POPARG4 := 38;
+const MIDCODE_ASMGROUPEND := 17;
+const MIDCODE_STORE0 := 49;
+const MIDCODE_JUMP := 27;
+const MIDCODE_BAND := 54;
+const MIDCODE_LABEL := 26;
+const MIDCODE_INIT8 := 11;
+const MIDCODE_NOT8 := 110;
+const MIDCODE_WHENCASE4 := 79;
+const MIDCODE_ENDSUB := 5;
+const MIDCODE_WHENCASE1 := 77;
+const MIDCODE_ENDCASE1 := 82;
+const MIDCODE_CAST21 := 92;
+const MIDCODE_CALL := 29;
+const MIDCODE_LSHIFT4 := 119;
+const MIDCODE_INIT1 := 8;
+const MIDCODE_FALLBACK := 24;
+const MIDCODE_CAST41 := 97;
+const MIDCODE_OR4 := 174;
+const MIDCODE_ASMSTART := 18;
+const MIDCODE_ASMSYMBOL := 20;
+const MIDCODE_INITSUBREF := 14;
+const MIDCODE_ASMTEXT := 19;
+const MIDCODE_INITSTRING := 12;
+const MIDCODE_BLTU8 := 70;
+const MIDCODE_SUB0 := 131;
+const MIDCODE_RSHIFTS1 := 127;
+const MIDCODE_STARTCASE8 := 75;
+const MIDCODE_RETURN := 28;
+const MIDCODE_CAST44 := 99;
+const MIDCODE_NEG4 := 114;
+const MIDCODE_STARTINIT := 6;
+const MIDCODE_RSHIFTS0 := 126;
+const MIDCODE_AND8 := 170;
+const MIDCODE_REMS4 := 154;
+const MIDCODE_STARTSUB := 4;
+const MIDCODE_POPARG1 := 36;
+const MIDCODE_INIT4 := 10;
+const MIDCODE_BLTS4 := 64;
+const MIDCODE_BLTU4 := 69;
+const MIDCODE_ARG4 := 33;
+const MIDCODE_BOR := 55;
+const MIDCODE_RSHIFTU8 := 125;
+const MIDCODE_RSHIFTU2 := 123;
+record MidcodeBor is
+	truelabel: LabelRef;
+	falselabel: LabelRef;
+	fallthrough: LabelRef;
+	negated: uint8;
+end record;
+record MidcodeArg is
+	subr: [Subroutine];
+	sym: [Symbol];
+	remaining: uint8;
+end record;
+record MidcodeInitsubref is
+	subr: [Subroutine];
+end record;
+record MidcodeBlts is
+	truelabel: LabelRef;
+	falselabel: LabelRef;
+	fallthrough: LabelRef;
+	negated: uint8;
+end record;
+record MidcodeAsmsubref is
+	subr: [Subroutine];
+end record;
+record MidcodeAsmvalue is
+	value: int32;
+end record;
+record MidcodeStartsub is
+	subr: [Subroutine];
+end record;
+record MidcodeStartinit is
+	sym: [Symbol];
+end record;
+record MidcodeCast8 is
+	sext: uint8;
+end record;
+record MidcodeString is
+	text: string;
+end record;
+record MidcodeBltu is
+	truelabel: LabelRef;
+	falselabel: LabelRef;
+	fallthrough: LabelRef;
+	negated: uint8;
+end record;
+record MidcodeAsmsymbol is
+	sym: [Symbol];
+end record;
+record MidcodeInit is
+	value: int32;
+end record;
+record MidcodeCall is
+	subr: [Subroutine];
+end record;
+record MidcodeWhencase is
+	value: int32;
+	falselabel: uint16;
+end record;
+record MidcodeConstant is
+	value: int32;
+end record;
+record MidcodeAddress is
+	sym: [Symbol];
+	off: Size;
+end record;
+record MidcodePoparg is
+	subr: [Subroutine];
+	sym: [Symbol];
+	remaining: uint8;
+end record;
+record MidcodeEndsub is
+	subr: [Subroutine];
+end record;
+record MidcodeAsmtext is
+	text: string;
+end record;
+record MidcodeInitstring is
+	text: string;
+end record;
+record MidcodeCast2 is
+	sext: uint8;
+end record;
+record MidcodeLabel is
+	label: uint16;
+end record;
+record MidcodeCast4 is
+	sext: uint8;
+end record;
+record MidcodeSubref is
+	subr: [Subroutine];
+end record;
+record MidcodeCast1 is
+	sext: uint8;
+end record;
+record MidcodeInitaddress is
+	sym: [Symbol];
+	off: Size;
+end record;
+record MidcodeBand is
+	truelabel: LabelRef;
+	falselabel: LabelRef;
+	fallthrough: LabelRef;
+	negated: uint8;
+end record;
+record MidcodeJump is
+	label: uint16;
+end record;
+record MidcodeBeq is
+	truelabel: LabelRef;
+	falselabel: LabelRef;
+	fallthrough: LabelRef;
+	negated: uint8;
+end record;
+record Node is
+	bor @at(0): MidcodeBor;
+	arg @at(0): MidcodeArg;
+	initsubref @at(0): MidcodeInitsubref;
+	blts @at(0): MidcodeBlts;
+	asmsubref @at(0): MidcodeAsmsubref;
+	asmvalue @at(0): MidcodeAsmvalue;
+	startsub @at(0): MidcodeStartsub;
+	startinit @at(0): MidcodeStartinit;
+	cast8 @at(0): MidcodeCast8;
+	string @at(0): MidcodeString;
+	bltu @at(0): MidcodeBltu;
+	asmsymbol @at(0): MidcodeAsmsymbol;
+	init @at(0): MidcodeInit;
+	call @at(0): MidcodeCall;
+	whencase @at(0): MidcodeWhencase;
+	constant @at(0): MidcodeConstant;
+	address @at(0): MidcodeAddress;
+	poparg @at(0): MidcodePoparg;
+	endsub @at(0): MidcodeEndsub;
+	asmtext @at(0): MidcodeAsmtext;
+	initstring @at(0): MidcodeInitstring;
+	cast2 @at(0): MidcodeCast2;
+	label @at(0): MidcodeLabel;
+	cast4 @at(0): MidcodeCast4;
+	subref @at(0): MidcodeSubref;
+	cast1 @at(0): MidcodeCast1;
+	initaddress @at(0): MidcodeInitaddress;
+	band @at(0): MidcodeBand;
+	jump @at(0): MidcodeJump;
+	beq @at(0): MidcodeBeq;
+	type: [Type];
+	left: [Node];
+	right: [Node];
+	op: uint8;
+end record;
+sub MidDeref(width: uint8, left: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_DEREF0 + WidthToIndex(width));
+	m.left := left;
+end sub;
+sub MidCast1(width: uint8, left: [Node], sext: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_CAST10 + WidthToIndex(width));
+	m.left := left;
+	m.cast1.sext := sext;
+end sub;
+sub MidOr(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_OR0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidAsmsubref(subr: [Subroutine]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ASMSUBREF);
+	m.asmsubref.subr := subr;
+end sub;
+sub MidRemu(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_REMU0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidConstant(value: int32): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_CONSTANT);
+	m.constant.value := value;
+end sub;
+sub MidEndinit(): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ENDINIT);
+end sub;
+sub MidEor(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_EOR0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidSubref(subr: [Subroutine]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_SUBREF);
+	m.subref.subr := subr;
+end sub;
+sub MidAsmgroupstart(): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ASMGROUPSTART);
+end sub;
+sub MidEnd(): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_END);
+end sub;
+sub MidWhencase(width: uint8, value: int32, falselabel: uint16): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_WHENCASE0 + WidthToIndex(width));
+	m.whencase.value := value;
+	m.whencase.falselabel := falselabel;
+end sub;
+sub MidBlts(width: uint8, left: [Node], right: [Node], truelabel: LabelRef, falselabel: LabelRef, fallthrough: LabelRef, negated: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_BLTS0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+	m.blts.truelabel := truelabel;
+	m.blts.falselabel := falselabel;
+	m.blts.fallthrough := fallthrough;
+	m.blts.negated := negated;
+end sub;
+sub MidPair(left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_PAIR);
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidAsmvalue(value: int32): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ASMVALUE);
+	m.asmvalue.value := value;
+end sub;
+sub MidString(text: string): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_STRING);
+	m.string.text := text;
+end sub;
+sub MidCast8(width: uint8, left: [Node], sext: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_CAST80 + WidthToIndex(width));
+	m.left := left;
+	m.cast8.sext := sext;
+end sub;
+sub MidRshiftu(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_RSHIFTU0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidAddress(sym: [Symbol], off: Size): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ADDRESS);
+	m.address.sym := sym;
+	m.address.off := off;
+end sub;
+sub MidStartfile(): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_STARTFILE);
+end sub;
+sub MidCast2(width: uint8, left: [Node], sext: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_CAST20 + WidthToIndex(width));
+	m.left := left;
+	m.cast2.sext := sext;
+end sub;
+sub MidLshift(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_LSHIFT0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidBeq(width: uint8, left: [Node], right: [Node], truelabel: LabelRef, falselabel: LabelRef, fallthrough: LabelRef, negated: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_BEQ0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+	m.beq.truelabel := truelabel;
+	m.beq.falselabel := falselabel;
+	m.beq.fallthrough := fallthrough;
+	m.beq.negated := negated;
+end sub;
+sub MidAdd(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ADD0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidInit(width: uint8, value: int32): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_INIT0 + WidthToIndex(width));
+	m.init.value := value;
+end sub;
+sub MidBltu(width: uint8, left: [Node], right: [Node], truelabel: LabelRef, falselabel: LabelRef, fallthrough: LabelRef, negated: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_BLTU0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+	m.bltu.truelabel := truelabel;
+	m.bltu.falselabel := falselabel;
+	m.bltu.fallthrough := fallthrough;
+	m.bltu.negated := negated;
+end sub;
+sub MidInitaddress(sym: [Symbol], off: Size): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_INITADDRESS);
+	m.initaddress.sym := sym;
+	m.initaddress.off := off;
+end sub;
+sub MidEndfile(): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ENDFILE);
+end sub;
+sub MidNot(width: uint8, left: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_NOT0 + WidthToIndex(width));
+	m.left := left;
+end sub;
+sub MidStartcase(width: uint8, left: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_STARTCASE0 + WidthToIndex(width));
+	m.left := left;
+end sub;
+sub MidCast4(width: uint8, left: [Node], sext: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_CAST40 + WidthToIndex(width));
+	m.left := left;
+	m.cast4.sext := sext;
+end sub;
+sub MidAnd(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_AND0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidMul(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_MUL0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidAsmend(): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ASMEND);
+end sub;
+sub MidRems(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_REMS0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidEndcase(width: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ENDCASE0 + WidthToIndex(width));
+end sub;
+sub MidDivs(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_DIVS0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidDivu(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_DIVU0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidPoparg(width: uint8, subr: [Subroutine], sym: [Symbol], remaining: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_POPARG0 + WidthToIndex(width));
+	m.poparg.subr := subr;
+	m.poparg.sym := sym;
+	m.poparg.remaining := remaining;
+end sub;
+sub MidArg(width: uint8, left: [Node], right: [Node], subr: [Subroutine], sym: [Symbol], remaining: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ARG0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+	m.arg.subr := subr;
+	m.arg.sym := sym;
+	m.arg.remaining := remaining;
+end sub;
+sub MidNeg(width: uint8, left: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_NEG0 + WidthToIndex(width));
+	m.left := left;
+end sub;
+sub MidAsmgroupend(): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ASMGROUPEND);
+end sub;
+sub MidStore(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_STORE0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidJump(label: uint16): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_JUMP);
+	m.jump.label := label;
+end sub;
+sub MidBand(left: [Node], right: [Node], truelabel: LabelRef, falselabel: LabelRef, fallthrough: LabelRef, negated: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_BAND);
+	m.left := left;
+	m.right := right;
+	m.band.truelabel := truelabel;
+	m.band.falselabel := falselabel;
+	m.band.fallthrough := fallthrough;
+	m.band.negated := negated;
+end sub;
+sub MidLabel(label: uint16): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_LABEL);
+	m.label.label := label;
+end sub;
+sub MidEndsub(subr: [Subroutine]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ENDSUB);
+	m.endsub.subr := subr;
+end sub;
+sub MidCall(left: [Node], right: [Node], subr: [Subroutine]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_CALL);
+	m.left := left;
+	m.right := right;
+	m.call.subr := subr;
+end sub;
+sub MidFallback(left: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_FALLBACK);
+	m.left := left;
+end sub;
+sub MidAsmstart(): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ASMSTART);
+end sub;
+sub MidAsmsymbol(sym: [Symbol]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ASMSYMBOL);
+	m.asmsymbol.sym := sym;
+end sub;
+sub MidInitsubref(subr: [Subroutine]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_INITSUBREF);
+	m.initsubref.subr := subr;
+end sub;
+sub MidAsmtext(text: string): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_ASMTEXT);
+	m.asmtext.text := text;
+end sub;
+sub MidInitstring(text: string): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_INITSTRING);
+	m.initstring.text := text;
+end sub;
+sub MidSub(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_SUB0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidReturn(): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_RETURN);
+end sub;
+sub MidStartinit(sym: [Symbol]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_STARTINIT);
+	m.startinit.sym := sym;
+end sub;
+sub MidRshifts(width: uint8, left: [Node], right: [Node]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_RSHIFTS0 + WidthToIndex(width));
+	m.left := left;
+	m.right := right;
+end sub;
+sub MidStartsub(subr: [Subroutine]): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_STARTSUB);
+	m.startsub.subr := subr;
+end sub;
+sub MidBor(left: [Node], right: [Node], truelabel: LabelRef, falselabel: LabelRef, fallthrough: LabelRef, negated: uint8): (m: [Node]) is
+	m := AllocateNewNode(MIDCODE_BOR);
+	m.left := left;
+	m.right := right;
+	m.bor.truelabel := truelabel;
+	m.bor.falselabel := falselabel;
+	m.bor.fallthrough := fallthrough;
+	m.bor.negated := negated;
+end sub;
+sub MidcodeName(op: uint8): (name: string) is
+	var labels: string[] := {
+		"END",
+		"STARTFILE",
+		"ENDFILE",
+		"STARTSUB",
+		"ENDSUB",
+		"STARTINIT",
+		"INIT0",
+		"INIT1",
+		"INIT2",
+		"INIT4",
+		"INIT8",
+		"INITSTRING",
+		"INITADDRESS",
+		"INITSUBREF",
+		"ENDINIT",
+		"ASMGROUPSTART",
+		"ASMGROUPEND",
+		"ASMSTART",
+		"ASMTEXT",
+		"ASMSYMBOL",
+		"ASMSUBREF",
+		"ASMVALUE",
+		"ASMEND",
+		"FALLBACK",
+		"PAIR",
+		"LABEL",
+		"JUMP",
+		"RETURN",
+		"CALL",
+		"ARG0",
+		"ARG1",
+		"ARG2",
+		"ARG4",
+		"ARG8",
+		"POPARG0",
+		"POPARG1",
+		"POPARG2",
+		"POPARG4",
+		"POPARG8",
+		"CONSTANT",
+		"STRING",
+		"ADDRESS",
+		"SUBREF",
+		"DEREF0",
+		"DEREF1",
+		"DEREF2",
+		"DEREF4",
+		"DEREF8",
+		"STORE0",
+		"STORE1",
+		"STORE2",
+		"STORE4",
+		"STORE8",
+		"BAND",
+		"BOR",
+		"BEQ0",
+		"BEQ1",
+		"BEQ2",
+		"BEQ4",
+		"BEQ8",
+		"BLTS0",
+		"BLTS1",
+		"BLTS2",
+		"BLTS4",
+		"BLTS8",
+		"BLTU0",
+		"BLTU1",
+		"BLTU2",
+		"BLTU4",
+		"BLTU8",
+		"STARTCASE0",
+		"STARTCASE1",
+		"STARTCASE2",
+		"STARTCASE4",
+		"STARTCASE8",
+		"WHENCASE0",
+		"WHENCASE1",
+		"WHENCASE2",
+		"WHENCASE4",
+		"WHENCASE8",
+		"ENDCASE0",
+		"ENDCASE1",
+		"ENDCASE2",
+		"ENDCASE4",
+		"ENDCASE8",
+		"CAST10",
+		"CAST11",
+		"CAST12",
+		"CAST14",
+		"CAST18",
+		"CAST20",
+		"CAST21",
+		"CAST22",
+		"CAST24",
+		"CAST28",
+		"CAST40",
+		"CAST41",
+		"CAST42",
+		"CAST44",
+		"CAST48",
+		"CAST80",
+		"CAST81",
+		"CAST82",
+		"CAST84",
+		"CAST88",
+		"NOT0",
+		"NOT1",
+		"NOT2",
+		"NOT4",
+		"NOT8",
+		"NEG0",
+		"NEG1",
+		"NEG2",
+		"NEG4",
+		"NEG8",
+		"LSHIFT0",
+		"LSHIFT1",
+		"LSHIFT2",
+		"LSHIFT4",
+		"LSHIFT8",
+		"RSHIFTU0",
+		"RSHIFTU1",
+		"RSHIFTU2",
+		"RSHIFTU4",
+		"RSHIFTU8",
+		"RSHIFTS0",
+		"RSHIFTS1",
+		"RSHIFTS2",
+		"RSHIFTS4",
+		"RSHIFTS8",
+		"SUB0",
+		"SUB1",
+		"SUB2",
+		"SUB4",
+		"SUB8",
+		"DIVU0",
+		"DIVU1",
+		"DIVU2",
+		"DIVU4",
+		"DIVU8",
+		"DIVS0",
+		"DIVS1",
+		"DIVS2",
+		"DIVS4",
+		"DIVS8",
+		"REMU0",
+		"REMU1",
+		"REMU2",
+		"REMU4",
+		"REMU8",
+		"REMS0",
+		"REMS1",
+		"REMS2",
+		"REMS4",
+		"REMS8",
+		"ADD0",
+		"ADD1",
+		"ADD2",
+		"ADD4",
+		"ADD8",
+		"MUL0",
+		"MUL1",
+		"MUL2",
+		"MUL4",
+		"MUL8",
+		"AND0",
+		"AND1",
+		"AND2",
+		"AND4",
+		"AND8",
+		"OR0",
+		"OR1",
+		"OR2",
+		"OR4",
+		"OR8",
+		"EOR0",
+		"EOR1",
+		"EOR2",
+		"EOR4",
+		"EOR8",
+	};
+	name := labels[op-1];
+end sub;

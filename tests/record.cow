@@ -1,0 +1,25 @@
+# Record test
+
+record Point is
+    x: uint16;
+    y: uint16;
+end record;
+
+var p: Point;
+
+p.x := 10;
+p.y := 20;
+
+print("Point test:\r\n");
+print("x = ");
+print_i16(p.x);
+print_nl();
+print("y = ");
+print_i16(p.y);
+print_nl();
+
+var sum: uint16;
+sum := p.x + p.y;
+print("x + y = ");
+print_i16(sum);
+print_nl();
