@@ -1,0 +1,518 @@
+const MIDCODE_STARTCASE1 := 72;
+const MIDCODE_LSHIFT1 := 117;
+const MIDCODE_BEQ0 := 56;
+const MIDCODE_CAST28 := 95;
+const MIDCODE_LSHIFT2 := 118;
+const MIDCODE_BLTS0 := 61;
+const MIDCODE_POPARG0 := 35;
+const MIDCODE_ARG0 := 30;
+const MIDCODE_STORE4 := 52;
+const MIDCODE_DIVU8 := 140;
+const MIDCODE_MUL2 := 163;
+const MIDCODE_ARG4 := 33;
+const MIDCODE_INIT4 := 10;
+const MIDCODE_FALLBACK := 24;
+const MIDCODE_MUL0 := 161;
+const MIDCODE_RSHIFTU1 := 122;
+const MIDCODE_DIVS4 := 144;
+const MIDCODE_NOT8 := 110;
+const MIDCODE_ARG8 := 34;
+const MIDCODE_CAST18 := 90;
+const MIDCODE_POPARG4 := 38;
+const MIDCODE_SUBREF := 43;
+const MIDCODE_CAST48 := 100;
+const MIDCODE_DEREF1 := 45;
+const MIDCODE_REMU0 := 146;
+const MIDCODE_END := 1;
+const MIDCODE_STARTCASE8 := 75;
+const MIDCODE_BEQ4 := 59;
+const MIDCODE_AND8 := 170;
+const MIDCODE_ASMSUBREF := 21;
+const MIDCODE_CAST84 := 104;
+const MIDCODE_CAST11 := 87;
+const MIDCODE_RSHIFTS2 := 128;
+const MIDCODE_BLTS8 := 65;
+const MIDCODE_DEREF8 := 48;
+const MIDCODE_ENDCASE4 := 84;
+const MIDCODE_ENDCASE1 := 82;
+const MIDCODE_BEQ8 := 60;
+const MIDCODE_ASMGROUPSTART := 16;
+const MIDCODE_DEREF0 := 44;
+const MIDCODE_NEG0 := 111;
+const MIDCODE_OR2 := 173;
+const MIDCODE_WHENCASE4 := 79;
+const MIDCODE_SUB2 := 133;
+const MIDCODE_SUB4 := 134;
+const MIDCODE_ADDRESS := 42;
+const MIDCODE_CAST81 := 102;
+const MIDCODE_LSHIFT0 := 116;
+const MIDCODE_CAST21 := 92;
+const MIDCODE_DIVU4 := 139;
+const MIDCODE_POPARG1 := 36;
+const MIDCODE_NEG8 := 115;
+const MIDCODE_ASMSYMBOL := 20;
+const MIDCODE_CAST80 := 101;
+const MIDCODE_RSHIFTS0 := 126;
+const MIDCODE_CAST82 := 103;
+const MIDCODE_RSHIFTU0 := 121;
+const MIDCODE_POPARG8 := 39;
+const MIDCODE_ASMGROUPEND := 17;
+const MIDCODE_REMU2 := 148;
+const MIDCODE_ASMTEXT := 19;
+const MIDCODE_CAST20 := 91;
+const MIDCODE_EOR8 := 180;
+const MIDCODE_STORE1 := 50;
+const MIDCODE_STARTINIT := 6;
+const MIDCODE_NEG1 := 112;
+const MIDCODE_INITADDRESS := 13;
+const MIDCODE_CALL := 29;
+const MIDCODE_REMU4 := 149;
+const MIDCODE_CONSTANT := 40;
+const MIDCODE_INIT1 := 8;
+const MIDCODE_CAST40 := 96;
+const MIDCODE_STORE2 := 51;
+const MIDCODE_EOR2 := 178;
+const MIDCODE_EOR1 := 177;
+const MIDCODE_NOT4 := 109;
+const MIDCODE_ADD8 := 160;
+const MIDCODE_EOR0 := 176;
+const MIDCODE_CAST42 := 98;
+const MIDCODE_RSHIFTU4 := 124;
+const MIDCODE_STARTCASE4 := 74;
+const MIDCODE_OR8 := 175;
+const MIDCODE_OR0 := 171;
+const MIDCODE_CAST44 := 99;
+const MIDCODE_OR4 := 174;
+const MIDCODE_LABEL := 26;
+const MIDCODE_ENDSUB := 5;
+const MIDCODE_INIT0 := 7;
+const MIDCODE_DEREF4 := 47;
+const MIDCODE_INIT2 := 9;
+const MIDCODE_AND4 := 169;
+const MIDCODE_ASMVALUE := 22;
+const MIDCODE_AND1 := 167;
+const MIDCODE_AND0 := 166;
+const MIDCODE_OR1 := 172;
+const MIDCODE_EOR4 := 179;
+const MIDCODE_DIVS1 := 142;
+const MIDCODE_ADD1 := 157;
+const MIDCODE_ADD4 := 159;
+const MIDCODE_ADD2 := 158;
+const MIDCODE_MUL1 := 162;
+const MIDCODE_ENDINIT := 15;
+const MIDCODE_ADD0 := 156;
+const MIDCODE_PAIR := 25;
+const MIDCODE_NEG4 := 114;
+const MIDCODE_ASMEND := 23;
+const MIDCODE_ENDCASE0 := 81;
+const MIDCODE_REMS8 := 155;
+const MIDCODE_REMS4 := 154;
+const MIDCODE_STORE8 := 53;
+const MIDCODE_RSHIFTU2 := 123;
+const MIDCODE_REMS2 := 153;
+const MIDCODE_INIT8 := 11;
+const MIDCODE_REMS1 := 152;
+const MIDCODE_REMS0 := 151;
+const MIDCODE_DIVU0 := 136;
+const MIDCODE_REMU8 := 150;
+const MIDCODE_REMU1 := 147;
+const MIDCODE_DIVS8 := 145;
+const MIDCODE_ASMSTART := 18;
+const MIDCODE_DIVS2 := 143;
+const MIDCODE_DIVS0 := 141;
+const MIDCODE_DIVU2 := 138;
+const MIDCODE_BAND := 54;
+const MIDCODE_DIVU1 := 137;
+const MIDCODE_BLTU2 := 68;
+const MIDCODE_NOT1 := 107;
+const MIDCODE_DEREF2 := 46;
+const MIDCODE_INITSTRING := 12;
+const MIDCODE_SUB8 := 135;
+const MIDCODE_STARTSUB := 4;
+const MIDCODE_SUB0 := 131;
+const MIDCODE_BLTU1 := 67;
+const MIDCODE_STARTCASE2 := 73;
+const MIDCODE_RSHIFTS4 := 129;
+const MIDCODE_ARG1 := 31;
+const MIDCODE_POPARG2 := 37;
+const MIDCODE_MUL8 := 165;
+const MIDCODE_BLTS1 := 62;
+const MIDCODE_WHENCASE8 := 80;
+const MIDCODE_LSHIFT8 := 120;
+const MIDCODE_AND2 := 168;
+const MIDCODE_INITSUBREF := 14;
+const MIDCODE_BOR := 55;
+const MIDCODE_SUB1 := 132;
+const MIDCODE_STARTFILE := 2;
+const MIDCODE_RSHIFTS8 := 130;
+const MIDCODE_WHENCASE2 := 78;
+const MIDCODE_CAST24 := 94;
+const MIDCODE_BLTS4 := 64;
+const MIDCODE_NEG2 := 113;
+const MIDCODE_WHENCASE0 := 76;
+const MIDCODE_CAST22 := 93;
+const MIDCODE_MUL4 := 164;
+const MIDCODE_NOT0 := 106;
+const MIDCODE_BLTU4 := 69;
+const MIDCODE_BLTU8 := 70;
+const MIDCODE_RETURN := 28;
+const MIDCODE_BEQ2 := 58;
+const MIDCODE_ARG2 := 32;
+const MIDCODE_BLTU0 := 66;
+const MIDCODE_ENDFILE := 3;
+const MIDCODE_STORE0 := 49;
+const MIDCODE_BLTS2 := 63;
+const MIDCODE_JUMP := 27;
+const MIDCODE_NOT2 := 108;
+const MIDCODE_CAST41 := 97;
+const MIDCODE_RSHIFTS1 := 127;
+const MIDCODE_ENDCASE8 := 85;
+const MIDCODE_RSHIFTU8 := 125;
+const MIDCODE_CAST14 := 89;
+const MIDCODE_STARTCASE0 := 71;
+const MIDCODE_WHENCASE1 := 77;
+const MIDCODE_STRING := 41;
+const MIDCODE_CAST88 := 105;
+const MIDCODE_ENDCASE2 := 83;
+const MIDCODE_CAST10 := 86;
+const MIDCODE_LSHIFT4 := 119;
+const MIDCODE_CAST12 := 88;
+const MIDCODE_BEQ1 := 57;
+record MidcodeAsmsubref is
+	subr: [Subroutine];
+end record;
+record MidcodeCast2 is
+	sext: uint8;
+end record;
+record MidcodeAsmtext is
+	text: string;
+end record;
+record MidcodeBlts is
+	truelabel: LabelRef;
+	falselabel: LabelRef;
+	fallthrough: LabelRef;
+	negated: uint8;
+end record;
+record MidcodeBand is
+	truelabel: LabelRef;
+	falselabel: LabelRef;
+	fallthrough: LabelRef;
+	negated: uint8;
+end record;
+record MidcodeJump is
+	label: uint16;
+end record;
+record MidcodeStartinit is
+	sym: Symbol;
+end record;
+record MidcodeInitaddress is
+	sym: Symbol;
+	off: Size;
+end record;
+record MidcodeCall is
+	subr: [Subroutine];
+end record;
+record MidcodeCast8 is
+	sext: uint8;
+end record;
+record MidcodeBor is
+	truelabel: LabelRef;
+	falselabel: LabelRef;
+	fallthrough: LabelRef;
+	negated: uint8;
+end record;
+record MidcodeCast4 is
+	sext: uint8;
+end record;
+record MidcodeAddress is
+	sym: Symbol;
+	off: Size;
+end record;
+record MidcodeStartsub is
+	subr: [Subroutine];
+end record;
+record MidcodeInitstring is
+	text: string;
+end record;
+record MidcodeBltu is
+	truelabel: LabelRef;
+	falselabel: LabelRef;
+	fallthrough: LabelRef;
+	negated: uint8;
+end record;
+record MidcodeInit is
+	value: int32;
+end record;
+record MidcodeWhencase is
+	value: int32;
+	falselabel: uint16;
+end record;
+record MidcodeAsmvalue is
+	value: int32;
+end record;
+record MidcodeSubref is
+	subr: [Subroutine];
+end record;
+record MidcodeEndsub is
+	subr: [Subroutine];
+end record;
+record MidcodeLabel is
+	label: uint16;
+end record;
+record MidcodeConstant is
+	value: int32;
+end record;
+record MidcodeAsmsymbol is
+	sym: Symbol;
+end record;
+record MidcodeBeq is
+	truelabel: LabelRef;
+	falselabel: LabelRef;
+	fallthrough: LabelRef;
+	negated: uint8;
+end record;
+record MidcodeInitsubref is
+	subr: [Subroutine];
+end record;
+record MidcodeString is
+	text: string;
+end record;
+record MidcodePoparg is
+	subr: [Subroutine];
+	sym: Symbol;
+	remaining: uint8;
+end record;
+record MidcodeArg is
+	subr: [Subroutine];
+	sym: Symbol;
+	remaining: uint8;
+end record;
+record MidcodeCast1 is
+	sext: uint8;
+end record;
+record Node is
+	asmsubref @at(0): MidcodeAsmsubref;
+	cast2 @at(0): MidcodeCast2;
+	asmtext @at(0): MidcodeAsmtext;
+	blts @at(0): MidcodeBlts;
+	band @at(0): MidcodeBand;
+	jump @at(0): MidcodeJump;
+	startinit @at(0): MidcodeStartinit;
+	initaddress @at(0): MidcodeInitaddress;
+	call @at(0): MidcodeCall;
+	cast8 @at(0): MidcodeCast8;
+	bor @at(0): MidcodeBor;
+	cast4 @at(0): MidcodeCast4;
+	address @at(0): MidcodeAddress;
+	startsub @at(0): MidcodeStartsub;
+	initstring @at(0): MidcodeInitstring;
+	bltu @at(0): MidcodeBltu;
+	init @at(0): MidcodeInit;
+	whencase @at(0): MidcodeWhencase;
+	asmvalue @at(0): MidcodeAsmvalue;
+	subref @at(0): MidcodeSubref;
+	endsub @at(0): MidcodeEndsub;
+	label @at(0): MidcodeLabel;
+	constant @at(0): MidcodeConstant;
+	asmsymbol @at(0): MidcodeAsmsymbol;
+	beq @at(0): MidcodeBeq;
+	initsubref @at(0): MidcodeInitsubref;
+	string @at(0): MidcodeString;
+	poparg @at(0): MidcodePoparg;
+	arg @at(0): MidcodeArg;
+	cast1 @at(0): MidcodeCast1;
+	left: [Node];
+	right: [Node];
+	producer: [Instruction];
+	consumer: [Instruction];
+	desired_reg: RegId;
+	produced_reg: RegId;
+	next: [Node];
+	operand: Operand;
+	op: uint8;
+end record;
+sub MidcodeName(op: uint8): (name: string) is
+	var labels: string[] := {
+		"END",
+		"STARTFILE",
+		"ENDFILE",
+		"STARTSUB",
+		"ENDSUB",
+		"STARTINIT",
+		"INIT0",
+		"INIT1",
+		"INIT2",
+		"INIT4",
+		"INIT8",
+		"INITSTRING",
+		"INITADDRESS",
+		"INITSUBREF",
+		"ENDINIT",
+		"ASMGROUPSTART",
+		"ASMGROUPEND",
+		"ASMSTART",
+		"ASMTEXT",
+		"ASMSYMBOL",
+		"ASMSUBREF",
+		"ASMVALUE",
+		"ASMEND",
+		"FALLBACK",
+		"PAIR",
+		"LABEL",
+		"JUMP",
+		"RETURN",
+		"CALL",
+		"ARG0",
+		"ARG1",
+		"ARG2",
+		"ARG4",
+		"ARG8",
+		"POPARG0",
+		"POPARG1",
+		"POPARG2",
+		"POPARG4",
+		"POPARG8",
+		"CONSTANT",
+		"STRING",
+		"ADDRESS",
+		"SUBREF",
+		"DEREF0",
+		"DEREF1",
+		"DEREF2",
+		"DEREF4",
+		"DEREF8",
+		"STORE0",
+		"STORE1",
+		"STORE2",
+		"STORE4",
+		"STORE8",
+		"BAND",
+		"BOR",
+		"BEQ0",
+		"BEQ1",
+		"BEQ2",
+		"BEQ4",
+		"BEQ8",
+		"BLTS0",
+		"BLTS1",
+		"BLTS2",
+		"BLTS4",
+		"BLTS8",
+		"BLTU0",
+		"BLTU1",
+		"BLTU2",
+		"BLTU4",
+		"BLTU8",
+		"STARTCASE0",
+		"STARTCASE1",
+		"STARTCASE2",
+		"STARTCASE4",
+		"STARTCASE8",
+		"WHENCASE0",
+		"WHENCASE1",
+		"WHENCASE2",
+		"WHENCASE4",
+		"WHENCASE8",
+		"ENDCASE0",
+		"ENDCASE1",
+		"ENDCASE2",
+		"ENDCASE4",
+		"ENDCASE8",
+		"CAST10",
+		"CAST11",
+		"CAST12",
+		"CAST14",
+		"CAST18",
+		"CAST20",
+		"CAST21",
+		"CAST22",
+		"CAST24",
+		"CAST28",
+		"CAST40",
+		"CAST41",
+		"CAST42",
+		"CAST44",
+		"CAST48",
+		"CAST80",
+		"CAST81",
+		"CAST82",
+		"CAST84",
+		"CAST88",
+		"NOT0",
+		"NOT1",
+		"NOT2",
+		"NOT4",
+		"NOT8",
+		"NEG0",
+		"NEG1",
+		"NEG2",
+		"NEG4",
+		"NEG8",
+		"LSHIFT0",
+		"LSHIFT1",
+		"LSHIFT2",
+		"LSHIFT4",
+		"LSHIFT8",
+		"RSHIFTU0",
+		"RSHIFTU1",
+		"RSHIFTU2",
+		"RSHIFTU4",
+		"RSHIFTU8",
+		"RSHIFTS0",
+		"RSHIFTS1",
+		"RSHIFTS2",
+		"RSHIFTS4",
+		"RSHIFTS8",
+		"SUB0",
+		"SUB1",
+		"SUB2",
+		"SUB4",
+		"SUB8",
+		"DIVU0",
+		"DIVU1",
+		"DIVU2",
+		"DIVU4",
+		"DIVU8",
+		"DIVS0",
+		"DIVS1",
+		"DIVS2",
+		"DIVS4",
+		"DIVS8",
+		"REMU0",
+		"REMU1",
+		"REMU2",
+		"REMU4",
+		"REMU8",
+		"REMS0",
+		"REMS1",
+		"REMS2",
+		"REMS4",
+		"REMS8",
+		"ADD0",
+		"ADD1",
+		"ADD2",
+		"ADD4",
+		"ADD8",
+		"MUL0",
+		"MUL1",
+		"MUL2",
+		"MUL4",
+		"MUL8",
+		"AND0",
+		"AND1",
+		"AND2",
+		"AND4",
+		"AND8",
+		"OR0",
+		"OR1",
+		"OR2",
+		"OR4",
+		"OR8",
+		"EOR0",
+		"EOR1",
+		"EOR2",
+		"EOR4",
+		"EOR8",
+	};
+	name := labels[op-1];
+end sub;

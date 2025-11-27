@@ -1,0 +1,2499 @@
+
+	record Extern is
+		name: string;
+		id: uint16;
+		next: [Extern];
+	end record;
+
+	var externs: [Extern] := (0 as [Extern]);
+
+	sub ArchAlignUp(value: Size, alignment: uint8): (newvalue: Size) is
+		newvalue := value;
+	end sub;
+
+	sub E_symref(sym: [Symbol], off: Size) is
+		if sym.wsid == WSID_STATIC then
+			E_wsref(sym.subr.id, sym.wsid, sym.off);
+			if off != 0 then
+				E_i16(off as int16);
+			end if;
+		else
+			E_wsref(sym.subr.id, sym.wsid, sym.off + off);
+		end if;
+	end sub;
+
+	sub R_flushall() is
+		RegCacheFlush(ALL_REGS);
+	end sub;
+
+	sub R_flush(reg: RegId) is
+		RegCacheFlush(FindConflictingRegisters(reg));
+	end sub;
+
+	sub E_label(label: LabelRef) is
+		R_flushall();
+		E_labelref(label);
+		E(":\n");
+	end sub;
+
+	sub E_jump(insn: string, label: LabelRef) is
+		R_flushall();
+		E_tab();
+		E(insn);
+		E_space();
+		E_labelref(label);
+		E_nl();
+	end sub;
+
+	sub E_jmp(label: LabelRef) is
+		E_jump("jmp", label);
+	end sub;
+
+	sub E_jnz(label: LabelRef) is
+		E_jump("jnz", label);
+	end sub;
+
+	sub E_call(subr: [Subroutine]) is
+		R_flushall();
+		E_tab();
+		E("call ");
+		E_subref(subr);
+		E_nl();
+	end sub;
+
+	sub getreg(reg: RegId, regtable: [RegId], name: string): (result: RegId) is
+		result := 0;
+		while reg != 0 loop
+			if (reg & 1) != 0 then
+				result := [regtable];
+				return;
+			end if;
+			reg := reg >> 1;
+			regtable := @next regtable;
+		end loop;
+
+		if result == 0 then
+			StartError();
+			print("bad ");
+			print(name);
+			print_char(' ');
+			print_hex_i16(reg);
+			EndError();
+		end if;
+	end sub;
+
+	sub loreg(reg: RegId): (result: RegId) is
+		var regs: RegId[] := {
+			REG_A,  # a
+			REG_C,  # b
+			REG_C,  # c
+			REG_E,  # d
+			REG_E,  # e
+			REG_L,  # h
+			REG_L,  # l
+			REG_L,  # hl
+			REG_E,  # de
+			REG_C,  # bc
+		};
+
+		result := getreg(reg, &regs[0], "loreg");
+	end sub;
+
+	sub hireg(reg: RegId): (result: RegId) is
+		var regs: RegId[] := {
+			REG_A,  # a
+			REG_B,  # b
+			REG_B,  # c
+			REG_D,  # d
+			REG_D,  # e
+			REG_H,  # h
+			REG_H,  # l
+			REG_H,  # hl
+			REG_D,  # de
+			REG_B,  # bc
+		};
+
+		result := getreg(reg, &regs[0], "loreg");
+	end sub;
+
+	sub E_reg(reg: RegId) is
+		var names: string[] := {
+			"a",
+			"b",
+			"c",
+			"d",
+			"e",
+			"h",
+			"l",
+			"h",
+			"d",
+			"b",
+		};
+
+		var p := &names[0];
+		while reg != 0 loop
+			if (reg & 1) != 0 then
+				E([p]);
+				return;
+			end if;
+			reg := reg >> 1;
+			p := @next p;
+		end loop;
+
+		StartError();
+		print("bad reg ");
+		print_hex_i16(reg);
+		EndError();
+	end sub;
+
+	sub E_stackreg(reg: RegId) is
+		if reg == REG_A then
+			E("psw");
+		else
+			E_reg(reg);
+		end if;
+	end sub;
+
+	sub E_ret() is
+		E("\tret\n");
+	end sub;
+
+	sub E_dw() is
+		E("\tdw ");
+	end sub;
+
+	sub E_mov(dest: RegId, src: RegId) is
+		R_flush(dest);
+		E_tab();
+		E("mov ");
+		E_reg(dest);
+		E_comma();
+		E_reg(src);
+		E_nl();
+	end sub;
+
+	sub E_push(src: RegId) is
+		E_tab();
+		E("push ");
+		E_stackreg(src);
+		E_nl();
+	end sub;
+
+	sub E_pop(dest: RegId) is
+		R_flush(dest);
+		E_tab();
+		E("pop ");
+		E_stackreg(dest);
+		E_nl();
+	end sub;
+
+	sub E_mvi(reg: RegId, value: uint8) is
+		if (reg & (REG_HL|REG_BC|REG_DE)) != 0 then
+			SimpleError("mvi with 16-bit reg");
+		end if;
+
+		var cache := RegCacheFindConstant(value as Word)
+			& (REG_A|REG_B|REG_C|REG_D|REG_H|REG_L);
+		if (cache & reg) != 0 then
+			# Already in the desired register.
+			return;
+		elseif cache != 0 then
+			# Already in a register, but not the one we want.
+			E_mov(reg, FindFirst(cache));
+			return;
+		end if;
+
+		R_flush(reg);
+		E("\tmvi ");
+		E_reg(reg);
+		E_comma();
+		E_u8(value);
+		E_nl();
+		RegCacheLeavesConstant(reg, value as Word);
+	end sub;
+
+	sub E_alu(insn: string, rhs: RegId) is
+		R_flush(REG_A);
+		E_tab();
+		E(insn);
+		E_space();
+		E_reg(rhs);
+		E_nl();
+	end sub;
+
+	sub E_xra(rhs: RegId) is
+		E_alu("xra", rhs);
+		if rhs == REG_A then
+			RegCacheLeavesConstant(REG_A, 0);
+		end if;
+	end sub;
+
+	sub E_ora(rhs: RegId) is
+		E_alu("ora", rhs);
+	end sub;
+
+	sub E_ana(rhs: RegId) is
+		E_alu("ana", rhs);
+	end sub;
+
+	sub E_add(rhs: RegId) is
+		E_alu("add", rhs);
+	end sub;
+
+	sub E_sub(rhs: RegId) is
+		E_alu("sub", rhs);
+	end sub;
+
+	sub E_sbb(rhs: RegId) is
+		E_alu("sbb", rhs);
+	end sub;
+
+	sub E_alui(insn: string, value: uint8) is
+		R_flush(REG_A);
+		E_tab();
+		E(insn);
+		E_space();
+		E_u8(value);
+		E_nl();
+	end sub;
+
+	sub E_cmp(reg: RegId) is
+		E_alu("cmp", reg);
+	end sub;
+
+	sub E_cpi(value: uint8) is
+		E_alui("cpi", value);
+	end sub;
+
+	sub E_adi(value: uint8) is
+		E_alui("adi", value);
+	end sub;
+
+	sub E_sui(value: uint8) is
+		E_alui("sui", value);
+	end sub;
+
+	sub E_sbi(value: uint8) is
+		E_alui("sbi", value);
+	end sub;
+
+	sub E_ori(value: uint8) is
+		E_alui("ori", value);
+	end sub;
+
+	sub E_ani(value: uint8) is
+		E_alui("ani", value);
+	end sub;
+
+	sub E_xri(value: uint8) is
+		E_alui("xri", value);
+	end sub;
+
+	sub E_lxi(reg: RegId, value: uint16) is
+		var cache := RegCacheFindConstant(value as Word) & (REG_HL|REG_BC|REG_DE);
+		if (cache & reg) != 0 then
+			# The value is already in the desired register.
+			return;
+		elseif cache != 0 then
+			# The value is already in a register, but not this one.
+			cache := FindFirst(cache);
+			E_mov(loreg(reg), loreg(cache));
+			E_mov(hireg(reg), hireg(cache));
+			return;
+		end if;
+
+		R_flush(reg);
+		E("\tlxi ");
+		E_reg(reg);
+		E_comma();
+		E_u16(value);
+		E_nl();
+		RegCacheLeavesConstant(reg, value as Word);
+		RegCacheLeavesConstant(loreg(reg), value as uint8 as Word);
+		RegCacheLeavesConstant(hireg(reg), (value>>8) as uint8 as Word);
+	end sub;
+
+	sub E_lxia(reg: RegId, sym: [Symbol], off: Size) is
+		# This optimisation is essentially not worth it on the 8080.
+		#var cache := RegCacheFindAddress(sym, off) & (REG_HL|REG_BC|REG_DE);
+		#if (cache & reg) != 0 then
+		#	# The value is already in the desired register.
+		#	return;
+		#elseif cache != 0 then
+		#	# The value is already in a register, but not this one.
+		#	cache := FindFirst(cache);
+		#	E_mov(loreg(reg), loreg(cache));
+		#	E_mov(hireg(reg), hireg(cache));
+		#	return;
+		#end if;
+
+		R_flush(reg);
+		E("\tlxi ");
+		E_reg(reg);
+		E_comma();
+		E_symref(sym, off);
+		E_nl();
+		#RegCacheLeavesAddress(reg, sym, off);
+	end sub;
+
+	sub E_lxisub(reg: RegId, subr: [Subroutine]) is
+		R_flush(reg);
+		E("\tlxi ");
+		E_reg(reg);
+		E_comma();
+		E_subref(subr);
+		E_nl();
+	end sub;
+
+	sub E_lda(sym: [Symbol], off: Size) is
+		var cache := RegCacheFindValue(sym, off);
+		if (cache & REG_A) != 0 then
+			# Value already in the right register.
+			return;
+		end if; # Other cases don't happen on the 8080.
+
+		R_flush(REG_A);
+		E("\tlda ");
+		E_symref(sym, off);
+		E_nl();
+		RegCacheLeavesValue(REG_A, sym, off);
+	end sub;
+
+	sub E_sta(sym: [Symbol], off: Size) is
+		E("\tsta ");
+		E_symref(sym, off);
+		E_nl();
+		RegCacheLeavesValue(REG_A, sym, off);
+	end sub;
+
+	sub E_lhld(sym: [Symbol], off: Size) is
+		var cache := RegCacheFindValue(sym, off);
+		if (cache & REG_HL) != 0 then
+			# Value already in the right register.
+			return;
+		end if; # Other cases don't happen on the 8080.
+
+		R_flush(REG_HL);
+		E("\tlhld ");
+		E_symref(sym, off);
+		E_nl();
+		RegCacheLeavesValue(REG_HL, sym, off);
+	end sub;
+
+	sub E_shld(sym: [Symbol], off: Size) is
+		E("\tshld ");
+		E_symref(sym, off);
+		E_nl();
+		RegCacheLeavesValue(REG_HL, sym, off);
+	end sub;
+
+	sub E_loadm(reg: RegId) is
+		R_flush(reg);
+		E("\tmov ");
+		E_reg(reg);
+		E(",m\n");
+	end sub;
+
+	sub E_storem(reg: RegId) is
+		E("\tmov m,");
+		E_reg(reg);
+		E_nl();
+	end sub;
+
+	sub E_storemc(value: uint8) is
+		E("\tmvi m,");
+		E_u8(value);
+		E_nl();
+	end sub;
+
+	sub E_stax(ptr: RegId) is
+		E("\tstax ");
+		E_reg(ptr);
+		E_nl();
+	end sub;
+
+	sub E_ldax(ptr: RegId) is
+		R_flush(REG_A);
+		E("\tldax ");
+		E_reg(ptr);
+		E_nl();
+	end sub;
+
+	sub E_inr(reg: RegId) is
+		R_flush(reg);
+		E("\tinr ");
+		E_reg(reg);
+		E_nl();
+	end sub;
+
+	sub E_dcr(reg: RegId) is
+		R_flush(reg);
+		E("\tdcr ");
+		E_reg(reg);
+		E_nl();
+	end sub;
+
+	sub E_inx(reg: RegId) is
+		R_flush(reg);
+		E("\tinx ");
+		E_reg(reg);
+		E_nl();
+	end sub;
+
+	sub E_dcx(reg: RegId) is
+		R_flush(reg);
+		E("\tdcx ");
+		E_reg(reg);
+		E_nl();
+	end sub;
+
+	sub E_xchg() is
+		R_flush(REG_HL|REG_DE);
+		E("\txchg\n");
+	end sub;
+
+	sub E_pchl() is
+		R_flushall();
+		E("\tpchl\n");
+	end sub;
+
+	sub E_cma() is
+		R_flush(REG_A);
+		E("\tcma\n");
+	end sub;
+
+	sub E_ral() is
+		R_flush(REG_A);
+		E("\tral\n");
+	end sub;
+
+	sub E_rar() is
+		R_flush(REG_A);
+		E("\trar\n");
+	end sub;
+
+	sub E_dad(reg: RegId) is
+		R_flush(REG_HL);
+		E("\tdad ");
+		E_reg(reg);
+		E_nl();
+	end sub;
+
+	# Does not persist the name; only call this with constant strings.
+	sub E_callhelper(name: string) is
+		var e := externs;
+		while e != (0 as [Extern]) loop
+			if StrCmp(e.name, name) == 0 then
+				break;
+			end if;
+			e := e.next;
+		end loop;
+
+		if e == (0 as [Extern]) then
+			e := InternalAlloc(@bytesof Extern) as [Extern];
+			e.name := name;
+			e.id := AllocSubrId();
+			e.next := externs;
+			externs := e;
+
+			EmitterDeclareExternalSubroutine(e.id, name);
+		end if;
+
+		EmitterReferenceSubroutineById(current_subr.id, e.id);
+
+		R_flushall();
+		E("\tcall ");
+		E_b8(COO_ESCAPE_SUBREF);
+		E_b16(e.id);
+		E_nl();
+	end sub;
+
+	var stringid: uint16 := 0;
+	sub E_string(data: string) is
+		var sid := stringid;
+		stringid := stringid + 1;
+
+		EmitterOpenStream(current_subr);
+
+		E_b8(COO_ESCAPE_THISCOO);
+		E_b8('c');
+		E_u16(sid);
+		E(":\n\tdb ");
+
+		loop
+			var c := [data];
+			if c == 0 then
+				break;
+			end if;
+			data := data + 1;
+			
+			E_u8(c);
+			E_comma();
+		end loop;
+		E("0\n");
+		EmitterCloseStream();
+
+		E_b8(COO_ESCAPE_THISCOO);
+		E_b8('c');
+		E_u16(sid);
+	end sub;
+
+    sub ArchBeginComment() is
+        E("\t; ");
+    end sub;
+
+    sub ArchEndComment() is
+        E_nl();
+    end sub;
+
+	# Note that this *destroys* the source register.
+	sub ArchEmitMove(src: RegId, dest: RegId) is
+		if src == 0 then
+			E_pop(dest);
+		elseif dest == 0 then
+			E_push(src);
+		elseif ((src == REG_HL) and (dest == REG_DE))
+				or ((src == REG_DE) and (dest == REG_HL)) then
+			E_xchg();
+		else
+			E_mov(dest, src);
+
+			if (src & (REG_HL|REG_BC|REG_DE)) != 0 then
+				E_mov(loreg(dest), loreg(src));
+			end if;
+		end if;
+	end sub;
+
+	sub ArchEndInstruction() is
+	end sub;
+
+	sub ArchEndGroup() is
+	end sub;
+
+	sub Call(addr: [MidcodeSubref]) is
+		E_call(addr.subr);
+	end sub;
+
+	sub CallI() is
+		E_callhelper("_jmpde");
+	end sub;
+
+	sub load2(dest: RegId) is
+		if dest == REG_HL then
+			E_loadm(REG_A);
+			E_inx(REG_HL);
+			E_loadm(dest);
+			E_mov(loreg(dest), REG_A);
+		else
+			E_loadm(loreg(dest));
+			E_inx(REG_HL);
+			E_loadm(dest);
+		end if;
+	end sub;
+
+	sub is_small_positive(value: int32): (result: uint8) is
+		if (value > 0) and (value < 5) then
+			result := 1;
+		else
+			result := 0;
+		end if;
+	end sub;
+
+	sub is_small_negative(value: int32): (result: uint8) is
+		if (value < 0) and (value > -5) then
+			result := 1;
+		else
+			result := 0;
+		end if;
+	end sub;
+
+	sub aluop2(lhs: RegId, rhs: RegId, dest: RegId, loinsn: string, hiinsn: string) is
+		E_mov(REG_A, loreg(lhs));
+		E_alu(loinsn, loreg(rhs));
+		E_mov(loreg(dest), REG_A);
+		E_mov(REG_A, lhs);
+		E_alu(hiinsn, rhs);
+		E_mov(dest, REG_A);
+	end sub;
+
+	sub aluop2i(lhs: RegId, value: uint16, dest: RegId, loinsn: string, hiinsn: string) is
+		E_mov(REG_A, loreg(lhs));
+		E_alui(loinsn, value as uint8);
+		E_mov(loreg(dest), REG_A);
+		E_mov(REG_A, lhs);
+		E_alui(hiinsn, (value >> 8) as uint8);
+		E_mov(dest, REG_A);
+	end sub;
+
+	sub dvrmu2() is
+		E_callhelper("_dvrmu2");
+	end sub;
+
+	sub dvrms2() is
+		E_callhelper("_dvrms2");
+	end sub;
+
+	sub logic2(lhs: RegId, rhs: RegId, dest: RegId, insn: string) is
+		aluop2(lhs, rhs, dest, insn, insn);
+	end sub;
+
+	sub logic2i(lhs: RegId, value: uint16, dest: RegId, insn: string) is
+		aluop2i(lhs, value, dest, insn, insn);
+	end sub;
+
+	sub E_jumps_with_fallthrough(trueinsn: string, falseinsn: string, node: [Node]) is
+		if node.beq.truelabel != node.beq.fallthrough then
+			E_jump(trueinsn, node.beq.truelabel);
+		end if;
+		if node.beq.falselabel != node.beq.fallthrough then
+			E_jump(falseinsn, node.beq.falselabel);
+		end if;
+	end sub;
+
+	sub E_jumps_jz_jnz(node: [Node]) is
+		E_jumps_with_fallthrough("jz", "jnz", node);
+	end sub;
+
+	sub E_jumps_jc_jnc(node: [Node]) is
+		E_jumps_with_fallthrough("jc", "jnc", node);
+	end sub;
+
+	sub E_jumps_jm_jp(node: [Node]) is
+		E_jumps_with_fallthrough("jm", "jp", node);
+	end sub;
+
+	sub bequ1(node: [Node], nota: RegId) is
+		E_cmp(nota);
+		E_jumps_jz_jnz(node);
+	end sub;
+
+	sub bequ1c(node: [Node], value: uint8) is
+		if value == 0 then
+			E_ora(REG_A);
+		else
+			E_cpi(value);
+		end if;
+		E_jumps_jz_jnz(node);
+	end sub;
+
+	sub bequ2(node: [Node]) is
+		E_callhelper("_cmpeq2");
+		E_jumps_jz_jnz(node);
+	end sub;
+
+	sub bequ2c(node: [Node], value: uint16) is
+		if value != 0 then
+			E_lxi(REG_DE, -value);
+			E_dad(REG_DE);
+		end if;
+		E_mov(REG_A, REG_H);
+		E_ora(REG_L);
+		E_jumps_jz_jnz(node);
+	end sub;
+
+	sub bequ4(node: [Node]) is
+		E_callhelper("_cmpu4");
+		E_jumps_jz_jnz(node);
+	end sub;
+
+	sub bequ40(node: [Node]) is
+		E_pop(REG_HL);
+		E_mov(REG_A, REG_H);
+		E_ora(REG_L);
+		E_pop(REG_HL);
+		E_ora(REG_H);
+		E_ora(REG_L);
+		E_jumps_jz_jnz(node);
+	end sub;
+
+	sub beqc(node: [Node], lhs: Arith, rhs: Arith) is
+		var label := node.beq.falselabel;
+		if lhs == rhs then
+			label := node.beq.truelabel;
+		end if;
+		if label != node.beq.fallthrough then
+			E_jmp(label);
+		end if;
+	end sub;
+
+	sub case2(value: uint16, reg: RegId, label: LabelRef) is
+		if value < 0x100 then
+			E_mov(REG_A, loreg(reg));
+			if value != 0 then
+				E_sbi(value as uint8);
+			end if;
+			E_ora(hireg(reg));
+		else
+			E_lxi(REG_HL, -value);
+			E_dad(reg);
+			E_mov(REG_A, REG_H);
+			E_ora(REG_L);
+		end if;
+		E_jnz(label);
+	end sub;
+sub MatchPredicate(rule: uint8, n: [[Node]]): (matches: uint8) is
+var slots: [Node][6];
+MemCopy(n as [uint8], @bytesof slots, &slots[0] as [uint8]);
+matches := 0;
+case rule is
+when 4:
+if  (slots[4].constant.value == -1) then matches := 1; end if;
+when 5:
+if  (slots[4].constant.value == 1) then matches := 1; end if;
+when 6:
+if  (slots[4].constant.value == 1) then matches := 1; end if;
+when 7:
+if  (slots[4].constant.value <= 5) then matches := 1; end if;
+when 8:
+if  (slots[4].constant.value <= 2) then matches := 1; end if;
+when 9:
+if  (is_small_positive(slots[4].constant.value) != 0) then matches := 1; end if;
+when 10:
+if  (is_small_negative(slots[4].constant.value) != 0) then matches := 1; end if;
+when 11:
+if  (slots[4].constant.value <= 5) then matches := 1; end if;
+when 13:
+if  (slots[4].constant.value == 0) then matches := 1; end if;
+when 14:
+if  (slots[4].constant.value == 0) then matches := 1; end if;
+when 15:
+if  (slots[4].constant.value == 0) then matches := 1; end if;
+when 16:
+if  (slots[4].constant.value == 0) then matches := 1; end if;
+when 23:
+if  (slots[0].poparg.remaining == 0) then matches := 1; end if;
+when 24:
+if  (slots[0].poparg.remaining == 0) then matches := 1; end if;
+when 25:
+if  (slots[0].poparg.remaining != 0) then matches := 1; end if;
+when 26:
+if  (slots[0].poparg.remaining != 0) then matches := 1; end if;
+when 52:
+if  (slots[0].cast1.sext == 0) then matches := 1; end if;
+when 53:
+if  (slots[0].cast1.sext != 0) then matches := 1; end if;
+when 54:
+if  (slots[0].cast1.sext == 0) then matches := 1; end if;
+when 55:
+if  (slots[0].cast1.sext != 0) then matches := 1; end if;
+when 57:
+if  (slots[0].cast2.sext == 0) then matches := 1; end if;
+when 58:
+if  (slots[0].cast2.sext != 0) then matches := 1; end if;
+end case;
+end sub;
+sub EmitOneInstruction(ruleid: uint8, self: [Instruction]) is
+record NodeSlot is
+	node: [Node];
+	reg: RegId;
+end record;
+var slots: NodeSlot[6];
+var psrc := &self.n[0];
+var pdest := &slots[0];
+var i: uint8 := 6;
+while i != 0 loop
+	pdest.node := [psrc];
+	if pdest.node != (0 as [Node]) then
+		pdest.reg := pdest.node.produced_reg;
+	end if;
+	psrc := @next psrc;
+	pdest := @next pdest;
+	i := i - 1;
+end loop;
+var selfreg := self.produced_reg;
+interface Emitter();
+sub emit_0 implements Emitter is
+#line 741 "src/cowbe/arch8080.cow.ng"
+ Call(&slots[4].node.subref); 
+end sub;
+sub emit_1 implements Emitter is
+#line 742 "src/cowbe/arch8080.cow.ng"
+ Call(&slots[4].node.subref); 
+end sub;
+sub emit_2 implements Emitter is
+#line 823 "src/cowbe/arch8080.cow.ng"
+
+	E_sta(&slots[5].node.address.sym, slots[5].node.address.off);
+
+end sub;
+sub emit_3 implements Emitter is
+#line 870 "src/cowbe/arch8080.cow.ng"
+
+	E_shld(&slots[5].node.address.sym, slots[5].node.address.off);
+
+end sub;
+sub emit_4 implements Emitter is
+#line 901 "src/cowbe/arch8080.cow.ng"
+ E_dcr(selfreg); 
+end sub;
+sub emit_5 implements Emitter is
+#line 904 "src/cowbe/arch8080.cow.ng"
+ E_inr(selfreg); 
+end sub;
+sub emit_6 implements Emitter is
+#line 913 "src/cowbe/arch8080.cow.ng"
+ E_dcr(selfreg); 
+end sub;
+sub emit_7 implements Emitter is
+#line 979 "src/cowbe/arch8080.cow.ng"
+
+	var i := slots[4].node.constant.value as uint8;
+	while i != 0 loop
+		E_add(REG_A);
+		i := i - 1;
+	end loop;
+
+end sub;
+sub emit_8 implements Emitter is
+#line 988 "src/cowbe/arch8080.cow.ng"
+
+	var i := slots[4].node.constant.value as uint8;
+	while i != 0 loop
+		E_ora(REG_A);
+		E_rar();
+		i := i - 1;
+	end loop;
+
+end sub;
+sub emit_9 implements Emitter is
+#line 1018 "src/cowbe/arch8080.cow.ng"
+
+	var i: uint8 := slots[4].node.constant.value as uint8;
+	while i != 0 loop
+		E_inx(selfreg);
+		i := i - 1;
+	end loop;
+
+end sub;
+sub emit_10 implements Emitter is
+#line 1027 "src/cowbe/arch8080.cow.ng"
+
+	var i: uint8 := slots[4].node.constant.value as uint8;
+	while i != 0 loop
+		E_dcx(selfreg);
+		i := i + 1;
+	end loop;
+
+end sub;
+sub emit_11 implements Emitter is
+#line 1169 "src/cowbe/arch8080.cow.ng"
+
+	var i := slots[4].node.constant.value as uint8;
+	while i != 0 loop
+		E_dad(REG_HL);
+		i := i - 1;
+	end loop;
+
+end sub;
+sub emit_12 implements Emitter is
+#line 1304 "src/cowbe/arch8080.cow.ng"
+ beqc(self.n[0], slots[1].node.constant.value, slots[4].node.constant.value); 
+end sub;
+sub emit_13 implements Emitter is
+#line 1344 "src/cowbe/arch8080.cow.ng"
+
+	E_ora(REG_A);
+	E_jumps_jm_jp(self.n[0]);
+
+end sub;
+sub emit_14 implements Emitter is
+#line 1384 "src/cowbe/arch8080.cow.ng"
+
+	E_mov(REG_A, hireg(slots[1].reg));
+	E_ora(REG_A);
+	E_jumps_jm_jp(self.n[0]);
+
+end sub;
+sub emit_15 implements Emitter is
+#line 1394 "src/cowbe/arch8080.cow.ng"
+ bequ40(self.n[0]); 
+end sub;
+sub emit_16 implements Emitter is
+#line 1409 "src/cowbe/arch8080.cow.ng"
+
+	E_pop(REG_A);
+	E_pop(REG_A); # high byte of 4-byte word ends up in A -- conveniently!
+	E_ora(REG_A);
+	E_jumps_jm_jp(self.n[0]);
+
+end sub;
+sub emit_17 implements Emitter is
+#line 1511 "src/cowbe/arch8080.cow.ng"
+ E_lda(&slots[2].node.address.sym, slots[2].node.address.off); 
+end sub;
+sub emit_18 implements Emitter is
+#line 1542 "src/cowbe/arch8080.cow.ng"
+ E_lda(&slots[2].node.address.sym, slots[2].node.address.off); 
+end sub;
+sub emit_19 implements Emitter is
+#line 1554 "src/cowbe/arch8080.cow.ng"
+ E_lhld(&slots[2].node.address.sym, slots[2].node.address.off); 
+end sub;
+sub emit_20 implements Emitter is
+#line 740 "src/cowbe/arch8080.cow.ng"
+ Call(&slots[4].node.subref); 
+end sub;
+sub emit_21 implements Emitter is
+#line 745 "src/cowbe/arch8080.cow.ng"
+ CallI(); 
+end sub;
+sub emit_22 implements Emitter is
+#line 746 "src/cowbe/arch8080.cow.ng"
+ CallI(); 
+end sub;
+sub emit_25 implements Emitter is
+#line 757 "src/cowbe/arch8080.cow.ng"
+ E_pop(selfreg); 
+end sub;
+sub emit_26 implements Emitter is
+#line 758 "src/cowbe/arch8080.cow.ng"
+ E_pop(selfreg); 
+end sub;
+sub emit_27 implements Emitter is
+#line 809 "src/cowbe/arch8080.cow.ng"
+
+	E_lda(&slots[1].node.address.sym, slots[1].node.address.off);
+
+end sub;
+sub emit_28 implements Emitter is
+#line 828 "src/cowbe/arch8080.cow.ng"
+
+	if slots[5].reg == REG_HL then
+		E_storem(REG_A);
+	else
+		E_stax(slots[5].reg);
+	end if;
+
+end sub;
+sub emit_29 implements Emitter is
+#line 845 "src/cowbe/arch8080.cow.ng"
+
+	E_lhld(&slots[1].node.address.sym, slots[1].node.address.off);
+
+end sub;
+sub emit_30 implements Emitter is
+#line 875 "src/cowbe/arch8080.cow.ng"
+
+	E_storem(loreg(slots[1].reg));
+	E_inx(REG_HL);
+	E_storem(slots[1].reg);
+
+end sub;
+sub emit_31 implements Emitter is
+#line 887 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_store4"); 
+end sub;
+sub emit_32 implements Emitter is
+#line 895 "src/cowbe/arch8080.cow.ng"
+ R_flush(REG_A); E("\tadd m\n"); 
+end sub;
+sub emit_33 implements Emitter is
+#line 898 "src/cowbe/arch8080.cow.ng"
+ E_adi(slots[4].node.constant.value as uint8); 
+end sub;
+sub emit_34 implements Emitter is
+#line 910 "src/cowbe/arch8080.cow.ng"
+ R_flush(REG_A); E("\tsub m\n"); 
+end sub;
+sub emit_35 implements Emitter is
+#line 916 "src/cowbe/arch8080.cow.ng"
+ E_sui(slots[4].node.constant.value as uint8); 
+end sub;
+sub emit_36 implements Emitter is
+#line 934 "src/cowbe/arch8080.cow.ng"
+ R_flush(REG_A); E("\tora m\n"); 
+end sub;
+sub emit_37 implements Emitter is
+#line 937 "src/cowbe/arch8080.cow.ng"
+ E_ori(slots[4].node.constant.value as uint8); 
+end sub;
+sub emit_38 implements Emitter is
+#line 943 "src/cowbe/arch8080.cow.ng"
+ R_flush(REG_A); E("\tana m\n"); 
+end sub;
+sub emit_39 implements Emitter is
+#line 946 "src/cowbe/arch8080.cow.ng"
+ E_ani(slots[4].node.constant.value as uint8); 
+end sub;
+sub emit_40 implements Emitter is
+#line 952 "src/cowbe/arch8080.cow.ng"
+ R_flush(REG_A); E("\txra m\n"); 
+end sub;
+sub emit_41 implements Emitter is
+#line 955 "src/cowbe/arch8080.cow.ng"
+ E_xri(slots[4].node.constant.value as uint8); 
+end sub;
+sub emit_42 implements Emitter is
+#line 1102 "src/cowbe/arch8080.cow.ng"
+
+	aluop2i(slots[1].reg, slots[4].node.constant.value as uint16, selfreg, "sui", "sbi");
+
+end sub;
+sub emit_43 implements Emitter is
+#line 1135 "src/cowbe/arch8080.cow.ng"
+ logic2i(slots[1].reg, slots[4].node.constant.value as uint16, selfreg, "ori"); 
+end sub;
+sub emit_44 implements Emitter is
+#line 1141 "src/cowbe/arch8080.cow.ng"
+ logic2i(slots[1].reg, slots[4].node.constant.value as uint16, selfreg, "ani"); 
+end sub;
+sub emit_45 implements Emitter is
+#line 1147 "src/cowbe/arch8080.cow.ng"
+ logic2i(slots[1].reg, slots[4].node.constant.value as uint16, selfreg, "xri"); 
+end sub;
+sub emit_46 implements Emitter is
+#line 1310 "src/cowbe/arch8080.cow.ng"
+
+	E("\tcmp m\n");
+	E_jumps_jz_jnz(self.n[0]);
+
+end sub;
+sub emit_47 implements Emitter is
+#line 1316 "src/cowbe/arch8080.cow.ng"
+ bequ1c(self.n[0], slots[4].node.constant.value as uint8); 
+end sub;
+sub emit_48 implements Emitter is
+#line 1325 "src/cowbe/arch8080.cow.ng"
+
+	E("\tcmp m\n");
+	E_jumps_jc_jnc(self.n[0]);
+
+end sub;
+sub emit_49 implements Emitter is
+#line 1331 "src/cowbe/arch8080.cow.ng"
+
+	var v := slots[4].node.constant.value as uint8;
+	E_cpi(v);
+	E_jumps_jc_jnc(self.n[0]);
+
+end sub;
+sub emit_50 implements Emitter is
+#line 1353 "src/cowbe/arch8080.cow.ng"
+ bequ2c(self.n[0], slots[4].node.constant.value as uint16); 
+end sub;
+sub emit_51 implements Emitter is
+#line 1367 "src/cowbe/arch8080.cow.ng"
+
+	E_mov(REG_A, loreg(slots[1].reg));
+	E_sui(slots[4].node.constant.value as uint8);
+
+	E_mov(REG_A, slots[1].reg);
+	E_sbi(((slots[4].node.constant.value as uint16) >> 8) as uint8);
+
+	E_jumps_jc_jnc(self.n[0]);
+
+end sub;
+sub emit_52 implements Emitter is
+#line 1474 "src/cowbe/arch8080.cow.ng"
+
+	E_mov(loreg(selfreg), REG_A);
+	E_mvi(hireg(selfreg), 0);
+
+end sub;
+sub emit_53 implements Emitter is
+#line 1480 "src/cowbe/arch8080.cow.ng"
+
+	E_mov(loreg(selfreg), REG_A);
+	E_ral();
+	E_sbb(REG_A);
+	E_mov(selfreg, REG_A);
+
+end sub;
+sub emit_54 implements Emitter is
+#line 1488 "src/cowbe/arch8080.cow.ng"
+
+	E_lxi(REG_HL, 0);
+	E_push(REG_HL);
+	E_mov(REG_L, REG_A);
+	E_push(REG_HL);
+
+end sub;
+sub emit_55 implements Emitter is
+#line 1496 "src/cowbe/arch8080.cow.ng"
+
+	E_mov(REG_B, REG_A);
+	E_ral();
+	E_sbb(REG_A);
+	E_mov(REG_H, REG_A);
+	E_mov(REG_L, REG_A);
+	E_push(REG_HL);
+	E_mov(REG_L, REG_B);
+	E_push(REG_HL);
+
+end sub;
+sub emit_56 implements Emitter is
+#line 1514 "src/cowbe/arch8080.cow.ng"
+ E_loadm(selfreg); 
+end sub;
+sub emit_57 implements Emitter is
+#line 1517 "src/cowbe/arch8080.cow.ng"
+
+	E_lxi(REG_BC, 0);
+	ArchEmitMove(REG_BC, 0);
+	ArchEmitMove(slots[1].reg, 0);
+
+end sub;
+sub emit_58 implements Emitter is
+#line 1524 "src/cowbe/arch8080.cow.ng"
+
+	E_mov(REG_A, slots[1].reg);
+	E_ral();
+	E_sbb(REG_A);
+	E_mov(REG_B, REG_A);
+	E_mov(REG_C, REG_A);
+	E_push(REG_BC);
+	E_push(slots[1].reg);
+
+end sub;
+sub emit_59 implements Emitter is
+#line 1545 "src/cowbe/arch8080.cow.ng"
+ E_loadm(selfreg); 
+end sub;
+sub emit_60 implements Emitter is
+#line 1557 "src/cowbe/arch8080.cow.ng"
+ load2(selfreg); 
+end sub;
+sub emit_63 implements Emitter is
+#line 596 "src/cowbe/arch8080.cow.ng"
+
+	E_label(slots[0].node.label.label);
+
+end sub;
+sub emit_64 implements Emitter is
+#line 601 "src/cowbe/arch8080.cow.ng"
+
+	E_jmp(slots[0].node.jump.label);
+
+end sub;
+sub emit_65 implements Emitter is
+#line 608 "src/cowbe/arch8080.cow.ng"
+
+	RegCacheReset();
+
+	EmitterOpenStream(current_subr);
+
+	E("\n\n\t; ");
+	E(current_subr.name);
+	E(" workspace at ");
+	E_b8(COO_ESCAPE_WSREF);
+	E_b16(current_subr.id);
+	E_b8(0);
+	E_b16(0);
+	E(" length ");
+	E_b8(COO_ESCAPE_WSSIZE);
+	E_b16(current_subr.id);
+	E_b8(0);
+	E_nl();
+
+	E_b8(COO_ESCAPE_THISSUB);
+	E(":\n");
+
+	var count := current_subr.num_input_parameters;
+	var lastparam := count - 1;
+	var popped: uint8 := 0;
+
+	sub pop_return_address() is
+		if popped == 0 then
+			E_pop(REG_BC);
+			popped := 1;
+		end if;
+	end sub;
+
+	while count != 0 loop
+		count := count - 1;
+		var param := GetInputParameter(current_subr, count);
+
+		case param.width is
+			when 1:
+				if count != lastparam then
+					pop_return_address();
+					E_pop(REG_A);
+				end if;
+				E_sta(param as [Symbol], 0);
+
+			when 2:
+				if count != lastparam then
+					pop_return_address();
+					E_pop(REG_HL);
+				end if;
+				E_shld(param as [Symbol], 0);
+
+			when 4:
+				pop_return_address();
+				E_pop(REG_HL);
+				E_shld(param as [Symbol], 0);
+				E_pop(REG_HL);
+				E_shld(param as [Symbol], 2);
+		end case;
+	end loop;
+
+	if popped != 0 then
+		E_push(REG_BC);
+	end if;
+
+end sub;
+sub emit_66 implements Emitter is
+#line 674 "src/cowbe/arch8080.cow.ng"
+
+	R_flushall();
+
+	E("end_");
+	E_subref(current_subr);
+	E(":\n");
+
+	var count: uint8 := 0;
+	var params := current_subr.num_output_parameters;
+	var pushed: uint8 := 0;
+
+	sub push_return_address() is
+		if pushed == 0 then
+			E_pop(REG_BC);
+			pushed := 1;
+		end if;
+	end sub;
+
+	while count != params loop
+		var param := GetOutputParameter(current_subr, count);
+
+		case param.width is
+			when 1:
+				E_lda(param as [Symbol], 0);
+				if count != (params-1) then
+					push_return_address();
+					E_push(REG_A);
+				end if;
+
+			when 2:
+				E_lhld(param as [Symbol], 0);
+				if count != (params-1) then
+					push_return_address();
+					E_push(REG_HL);
+				end if;
+
+			when 4:
+				push_return_address();
+				E_lhld(param as [Symbol], 2);
+				E_push(REG_HL);
+				E_lhld(param as [Symbol], 0);
+				E_push(REG_HL);
+		end case;
+
+		count := count + 1;
+	end loop;
+
+	if pushed != 0 then
+		E_push(REG_BC);
+	end if;
+	E_ret();
+
+	EmitterCloseStream();
+
+end sub;
+sub emit_67 implements Emitter is
+#line 744 "src/cowbe/arch8080.cow.ng"
+ CallI(); 
+end sub;
+sub emit_69 implements Emitter is
+#line 750 "src/cowbe/arch8080.cow.ng"
+ E_push(slots[4].reg); 
+end sub;
+sub emit_70 implements Emitter is
+#line 751 "src/cowbe/arch8080.cow.ng"
+ E_push(slots[4].reg); 
+end sub;
+sub emit_73 implements Emitter is
+#line 762 "src/cowbe/arch8080.cow.ng"
+
+    if current_subr.num_output_parameters == 0 then
+		E_ret();
+	else
+		E("\tjmp end_");
+		E_subref(current_subr);
+		E("\n");
+	end if;
+
+end sub;
+sub emit_74 implements Emitter is
+#line 775 "src/cowbe/arch8080.cow.ng"
+
+	if (slots[0].node.constant.value == 0) and (selfreg == REG_A) then
+		E_xra(REG_A);
+	else
+		E_mvi(selfreg, slots[0].node.constant.value as uint8);
+	end if;
+
+end sub;
+sub emit_75 implements Emitter is
+#line 784 "src/cowbe/arch8080.cow.ng"
+
+	E_lxi(selfreg, slots[0].node.constant.value as uint16);
+
+end sub;
+sub emit_76 implements Emitter is
+#line 789 "src/cowbe/arch8080.cow.ng"
+
+	E_lxi(REG_HL, (slots[0].node.constant.value >> 16) as uint16);
+	E_push(REG_HL);
+	E_lxi(REG_HL, slots[0].node.constant.value as uint16);
+	E_push(REG_HL);
+
+end sub;
+sub emit_77 implements Emitter is
+#line 797 "src/cowbe/arch8080.cow.ng"
+
+	E_lxia(selfreg, &slots[0].node.address.sym, slots[0].node.address.off);
+
+end sub;
+sub emit_78 implements Emitter is
+#line 802 "src/cowbe/arch8080.cow.ng"
+
+	E_lxisub(selfreg, slots[0].node.subref.subr);
+
+end sub;
+sub emit_79 implements Emitter is
+#line 814 "src/cowbe/arch8080.cow.ng"
+
+	if slots[1].reg == REG_HL then
+		E_loadm(REG_A);
+	else
+		E_ldax(slots[1].reg);
+	end if;
+
+end sub;
+sub emit_80 implements Emitter is
+#line 865 "src/cowbe/arch8080.cow.ng"
+
+	load2(selfreg);
+
+end sub;
+sub emit_81 implements Emitter is
+#line 884 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_load4"); 
+end sub;
+sub emit_82 implements Emitter is
+#line 892 "src/cowbe/arch8080.cow.ng"
+ E_add(slots[4].reg); 
+end sub;
+sub emit_83 implements Emitter is
+#line 907 "src/cowbe/arch8080.cow.ng"
+ E_sub(slots[4].reg); 
+end sub;
+sub emit_84 implements Emitter is
+#line 919 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_mul1"); 
+end sub;
+sub emit_85 implements Emitter is
+#line 922 "src/cowbe/arch8080.cow.ng"
+ E_cma(); 
+end sub;
+sub emit_86 implements Emitter is
+#line 925 "src/cowbe/arch8080.cow.ng"
+
+	E_xra(REG_A);
+	E_sub(slots[1].reg);
+
+end sub;
+sub emit_87 implements Emitter is
+#line 931 "src/cowbe/arch8080.cow.ng"
+ E_ora(slots[4].reg); 
+end sub;
+sub emit_88 implements Emitter is
+#line 940 "src/cowbe/arch8080.cow.ng"
+ E_ana(slots[4].reg); 
+end sub;
+sub emit_89 implements Emitter is
+#line 949 "src/cowbe/arch8080.cow.ng"
+ E_xra(slots[4].reg); 
+end sub;
+sub emit_90 implements Emitter is
+#line 958 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_dvrmu1"); 
+end sub;
+sub emit_91 implements Emitter is
+#line 961 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_dvrmu1"); 
+end sub;
+sub emit_92 implements Emitter is
+#line 964 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_dvrms1"); 
+end sub;
+sub emit_93 implements Emitter is
+#line 967 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_dvrms1"); 
+end sub;
+sub emit_94 implements Emitter is
+#line 970 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_asr1"); 
+end sub;
+sub emit_95 implements Emitter is
+#line 973 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_lsr1"); 
+end sub;
+sub emit_96 implements Emitter is
+#line 976 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_asl1"); 
+end sub;
+sub emit_97 implements Emitter is
+#line 1036 "src/cowbe/arch8080.cow.ng"
+
+	if (slots[1].reg != REG_HL) and (slots[4].reg != REG_HL) then
+		if slots[4].reg == REG_DE then
+			E_xchg();
+			slots[4].reg := REG_HL;
+		else
+			if slots[1].reg == REG_DE then
+				E_xchg();
+			else
+				ArchEmitMove(slots[1].reg, REG_HL);
+			end if;
+			slots[1].reg := REG_HL;
+		end if;
+	end if;
+
+	if slots[1].reg == REG_HL then
+		E_dad(slots[4].reg);
+	else
+		E_dad(slots[1].reg);
+	end if;
+
+end sub;
+sub emit_98 implements Emitter is
+#line 1059 "src/cowbe/arch8080.cow.ng"
+
+	E_xra(REG_A);
+	E_sub(loreg(slots[1].reg));
+	E_mov(loreg(selfreg), REG_A);
+	E_sbb(REG_A);
+	E_sub(slots[1].reg);
+	E_mov(selfreg, REG_A);
+
+end sub;
+sub emit_99 implements Emitter is
+#line 1097 "src/cowbe/arch8080.cow.ng"
+
+	aluop2(slots[1].reg, slots[4].reg, selfreg, "sub", "sbb");
+
+end sub;
+sub emit_100 implements Emitter is
+#line 1107 "src/cowbe/arch8080.cow.ng"
+ dvrmu2(); 
+end sub;
+sub emit_101 implements Emitter is
+#line 1110 "src/cowbe/arch8080.cow.ng"
+ dvrmu2(); 
+end sub;
+sub emit_102 implements Emitter is
+#line 1113 "src/cowbe/arch8080.cow.ng"
+ dvrms2(); 
+end sub;
+sub emit_103 implements Emitter is
+#line 1116 "src/cowbe/arch8080.cow.ng"
+ dvrms2(); 
+end sub;
+sub emit_104 implements Emitter is
+#line 1119 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_mul2"); 
+end sub;
+sub emit_105 implements Emitter is
+#line 1132 "src/cowbe/arch8080.cow.ng"
+ logic2(slots[1].reg, slots[4].reg, selfreg, "ora"); 
+end sub;
+sub emit_106 implements Emitter is
+#line 1138 "src/cowbe/arch8080.cow.ng"
+ logic2(slots[1].reg, slots[4].reg, selfreg, "ana"); 
+end sub;
+sub emit_107 implements Emitter is
+#line 1144 "src/cowbe/arch8080.cow.ng"
+ logic2(slots[1].reg, slots[4].reg, selfreg, "xra"); 
+end sub;
+sub emit_108 implements Emitter is
+#line 1150 "src/cowbe/arch8080.cow.ng"
+
+	E_mov(REG_A, loreg(slots[1].reg));
+	E_cma();
+	E_mov(loreg(selfreg), REG_A);
+	E_mov(REG_A, slots[1].reg);
+	E_cma();
+	E_mov(selfreg, REG_A);
+
+end sub;
+sub emit_109 implements Emitter is
+#line 1160 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_lsr2"); 
+end sub;
+sub emit_110 implements Emitter is
+#line 1163 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_asr2"); 
+end sub;
+sub emit_111 implements Emitter is
+#line 1166 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_asl2"); 
+end sub;
+sub emit_112 implements Emitter is
+#line 1180 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_add4"); 
+end sub;
+sub emit_113 implements Emitter is
+#line 1183 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_sub4"); 
+end sub;
+sub emit_114 implements Emitter is
+#line 1186 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_neg4"); 
+end sub;
+sub emit_115 implements Emitter is
+#line 1189 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_mul4"); 
+end sub;
+sub emit_116 implements Emitter is
+#line 1192 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_divu4"); 
+end sub;
+sub emit_117 implements Emitter is
+#line 1195 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_remu4"); 
+end sub;
+sub emit_118 implements Emitter is
+#line 1198 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_divs4"); 
+end sub;
+sub emit_119 implements Emitter is
+#line 1201 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_rems4"); 
+end sub;
+sub emit_120 implements Emitter is
+#line 1204 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_and4"); 
+end sub;
+sub emit_121 implements Emitter is
+#line 1207 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_or4"); 
+end sub;
+sub emit_122 implements Emitter is
+#line 1210 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_eor4"); 
+end sub;
+sub emit_123 implements Emitter is
+#line 1213 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_not4"); 
+end sub;
+sub emit_124 implements Emitter is
+#line 1216 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_asl4"); 
+end sub;
+sub emit_125 implements Emitter is
+#line 1219 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_lsr4"); 
+end sub;
+sub emit_126 implements Emitter is
+#line 1222 "src/cowbe/arch8080.cow.ng"
+ E_callhelper("_asr4"); 
+end sub;
+sub emit_127 implements Emitter is
+#line 1307 "src/cowbe/arch8080.cow.ng"
+ bequ1(self.n[0], slots[1].reg); 
+end sub;
+sub emit_128 implements Emitter is
+#line 1319 "src/cowbe/arch8080.cow.ng"
+
+	E_cmp(slots[4].reg);
+	E_jumps_jc_jnc(self.n[0]);
+
+end sub;
+sub emit_129 implements Emitter is
+#line 1338 "src/cowbe/arch8080.cow.ng"
+
+	E_callhelper("_cmps1");
+	E_jumps_jm_jp(self.n[0]);
+
+end sub;
+sub emit_130 implements Emitter is
+#line 1350 "src/cowbe/arch8080.cow.ng"
+ bequ2(self.n[0]); 
+end sub;
+sub emit_131 implements Emitter is
+#line 1356 "src/cowbe/arch8080.cow.ng"
+
+	E_mov(REG_A, loreg(slots[1].reg));
+	E_sub(loreg(slots[4].reg));
+
+	E_mov(REG_A, slots[1].reg);
+	E_sbb(slots[4].reg);
+
+	E_jumps_jc_jnc(self.n[0]);
+
+end sub;
+sub emit_132 implements Emitter is
+#line 1378 "src/cowbe/arch8080.cow.ng"
+
+	E_callhelper("_cmps2");
+	E_jumps_jc_jnc(self.n[0]);
+
+end sub;
+sub emit_133 implements Emitter is
+#line 1391 "src/cowbe/arch8080.cow.ng"
+ bequ4(self.n[0]); 
+end sub;
+sub emit_134 implements Emitter is
+#line 1397 "src/cowbe/arch8080.cow.ng"
+
+	E_callhelper("_cmpu4");
+	E_jumps_jc_jnc(self.n[0]);
+
+end sub;
+sub emit_135 implements Emitter is
+#line 1403 "src/cowbe/arch8080.cow.ng"
+
+	E_callhelper("_cmps4");
+	E_jumps_jc_jnc(self.n[0]);
+
+end sub;
+sub emit_138 implements Emitter is
+#line 1423 "src/cowbe/arch8080.cow.ng"
+
+	E_pop(REG_BC);
+	E_pop(REG_DE);
+
+end sub;
+sub emit_139 implements Emitter is
+#line 1429 "src/cowbe/arch8080.cow.ng"
+
+	if slots[0].node.whencase.value == 0 then
+		E_ora(REG_A);
+	else
+		E_cpi(slots[0].node.whencase.value as uint8);
+	end if;
+	E_jnz(slots[0].node.whencase.falselabel);
+
+end sub;
+sub emit_140 implements Emitter is
+#line 1457 "src/cowbe/arch8080.cow.ng"
+
+	case2(slots[0].node.whencase.value as uint16, REG_DE, slots[0].node.whencase.falselabel);
+
+end sub;
+sub emit_141 implements Emitter is
+#line 1462 "src/cowbe/arch8080.cow.ng"
+
+	case2(slots[0].node.whencase.value as uint16, REG_BC, slots[0].node.whencase.falselabel);
+	case2((slots[0].node.whencase.value >> 16) as uint16, REG_DE, slots[0].node.whencase.falselabel);
+
+end sub;
+sub emit_145 implements Emitter is
+#line 1508 "src/cowbe/arch8080.cow.ng"
+ E_mov(REG_A, loreg(slots[1].reg)); 
+end sub;
+sub emit_146 implements Emitter is
+#line 1535 "src/cowbe/arch8080.cow.ng"
+
+	E_pop(REG_HL);
+	E_mov(REG_A, REG_L);
+	E_pop(REG_HL);
+
+end sub;
+sub emit_147 implements Emitter is
+#line 1548 "src/cowbe/arch8080.cow.ng"
+
+	E_pop(REG_HL);
+	E_pop(REG_BC);
+
+end sub;
+sub emit_148 implements Emitter is
+#line 1562 "src/cowbe/arch8080.cow.ng"
+
+	R_flush(selfreg);
+	E("\tlxi ");
+	E_reg(selfreg);
+	E_comma();
+	E_string(slots[0].node.string.text);
+	E_nl();
+
+end sub;
+sub emit_149 implements Emitter is
+#line 1574 "src/cowbe/arch8080.cow.ng"
+
+	EmitterOpenStream(current_subr);
+	E_symref(&slots[0].node.startinit.sym, 0);
+	E(":\n");
+
+end sub;
+sub emit_150 implements Emitter is
+#line 1581 "src/cowbe/arch8080.cow.ng"
+
+	EmitterCloseStream();
+
+end sub;
+sub emit_151 implements Emitter is
+#line 1586 "src/cowbe/arch8080.cow.ng"
+
+	E("\tdb ");
+	E_u8(slots[0].node.init.value as uint8);
+	E_nl();
+
+end sub;
+sub emit_152 implements Emitter is
+#line 1593 "src/cowbe/arch8080.cow.ng"
+
+	E("\tdw ");
+	E_u16(slots[0].node.init.value as uint16);
+	E_nl();
+
+end sub;
+sub emit_153 implements Emitter is
+#line 1600 "src/cowbe/arch8080.cow.ng"
+
+	E("\tdw ");
+	E_u16(slots[0].node.init.value as uint16);
+	E_comma();
+	E_u16((slots[0].node.init.value>>16) as uint16);
+	E_nl();
+
+end sub;
+sub emit_154 implements Emitter is
+#line 1609 "src/cowbe/arch8080.cow.ng"
+
+    E_dw();
+    E_symref(&slots[0].node.initaddress.sym, slots[0].node.initaddress.off);
+    E_nl();
+
+end sub;
+sub emit_155 implements Emitter is
+#line 1616 "src/cowbe/arch8080.cow.ng"
+
+    E_dw();
+    E_subref(slots[0].node.initsubref.subr);
+    E_nl();
+
+end sub;
+sub emit_156 implements Emitter is
+#line 1623 "src/cowbe/arch8080.cow.ng"
+
+    E_dw();
+    E_string(slots[0].node.initstring.text);
+    E_nl();
+
+end sub;
+sub emit_159 implements Emitter is
+#line 1635 "src/cowbe/arch8080.cow.ng"
+
+	R_flushall();
+	E_tab();
+
+end sub;
+sub emit_160 implements Emitter is
+#line 1641 "src/cowbe/arch8080.cow.ng"
+
+	E(slots[0].node.asmtext.text);
+	E_space();
+
+end sub;
+sub emit_161 implements Emitter is
+#line 1647 "src/cowbe/arch8080.cow.ng"
+
+	E_symref(&slots[0].node.asmsymbol.sym, 0);
+	E_space();
+
+end sub;
+sub emit_162 implements Emitter is
+#line 1653 "src/cowbe/arch8080.cow.ng"
+
+	E_subref(slots[0].node.asmsubref.subr);
+	E_space();
+
+end sub;
+sub emit_163 implements Emitter is
+#line 1659 "src/cowbe/arch8080.cow.ng"
+
+    E_nl();
+
+end sub;
+sub nop_emitter implements Emitter is end sub;
+var emitters: Emitter[] := {
+	emit_0,
+	emit_1,
+	emit_2,
+	emit_3,
+	emit_4,
+	emit_5,
+	emit_6,
+	emit_7,
+	emit_8,
+	emit_9,
+	emit_10,
+	emit_11,
+	emit_12,
+	emit_13,
+	emit_14,
+	emit_15,
+	emit_16,
+	emit_17,
+	emit_18,
+	emit_19,
+	emit_20,
+	emit_21,
+	emit_22,
+	nop_emitter,
+	nop_emitter,
+	emit_25,
+	emit_26,
+	emit_27,
+	emit_28,
+	emit_29,
+	emit_30,
+	emit_31,
+	emit_32,
+	emit_33,
+	emit_34,
+	emit_35,
+	emit_36,
+	emit_37,
+	emit_38,
+	emit_39,
+	emit_40,
+	emit_41,
+	emit_42,
+	emit_43,
+	emit_44,
+	emit_45,
+	emit_46,
+	emit_47,
+	emit_48,
+	emit_49,
+	emit_50,
+	emit_51,
+	emit_52,
+	emit_53,
+	emit_54,
+	emit_55,
+	emit_56,
+	emit_57,
+	emit_58,
+	emit_59,
+	emit_60,
+	nop_emitter,
+	nop_emitter,
+	emit_63,
+	emit_64,
+	emit_65,
+	emit_66,
+	emit_67,
+	nop_emitter,
+	emit_69,
+	emit_70,
+	nop_emitter,
+	nop_emitter,
+	emit_73,
+	emit_74,
+	emit_75,
+	emit_76,
+	emit_77,
+	emit_78,
+	emit_79,
+	emit_80,
+	emit_81,
+	emit_82,
+	emit_83,
+	emit_84,
+	emit_85,
+	emit_86,
+	emit_87,
+	emit_88,
+	emit_89,
+	emit_90,
+	emit_91,
+	emit_92,
+	emit_93,
+	emit_94,
+	emit_95,
+	emit_96,
+	emit_97,
+	emit_98,
+	emit_99,
+	emit_100,
+	emit_101,
+	emit_102,
+	emit_103,
+	emit_104,
+	emit_105,
+	emit_106,
+	emit_107,
+	emit_108,
+	emit_109,
+	emit_110,
+	emit_111,
+	emit_112,
+	emit_113,
+	emit_114,
+	emit_115,
+	emit_116,
+	emit_117,
+	emit_118,
+	emit_119,
+	emit_120,
+	emit_121,
+	emit_122,
+	emit_123,
+	emit_124,
+	emit_125,
+	emit_126,
+	emit_127,
+	emit_128,
+	emit_129,
+	emit_130,
+	emit_131,
+	emit_132,
+	emit_133,
+	emit_134,
+	emit_135,
+	nop_emitter,
+	nop_emitter,
+	emit_138,
+	emit_139,
+	emit_140,
+	emit_141,
+	nop_emitter,
+	nop_emitter,
+	nop_emitter,
+	emit_145,
+	emit_146,
+	emit_147,
+	emit_148,
+	emit_149,
+	emit_150,
+	emit_151,
+	emit_152,
+	emit_153,
+	emit_154,
+	emit_155,
+	emit_156,
+	nop_emitter,
+	nop_emitter,
+	emit_159,
+	emit_160,
+	emit_161,
+	emit_162,
+	emit_163,
+};
+(emitters[ruleid as @indexof emitters])();
+end sub;
+var codegen_midcodes: uint8[] := {
+ 29,  31,  43, # 0
+ 29,  32,  43, # 1
+ 50,  45,  42, # 2
+ 51,  46,  42, # 3
+ 157,  40, # 4
+ 157,  40, # 5
+ 132,  40, # 6
+ 117,  40, # 7
+ 122,  40, # 8
+ 158,  40, # 9
+ 158,  40, # 10
+ 118,  40, # 11
+ 56,  40,  40, # 12
+ 62,  40, # 13
+ 63,  40, # 14
+ 59,  40, # 15
+ 64,  40, # 16
+ 92,  46,  42, # 17
+ 97,  47,  42, # 18
+ 98,  47,  42, # 19
+ 29,  43, # 20
+ 29,  31, # 21
+ 29,  32, # 22
+ 36, # 23
+ 37, # 24
+ 36, # 25
+ 37, # 26
+ 45,  42, # 27
+ 50,  45, # 28
+ 46,  42, # 29
+ 51,  46, # 30
+ 52,  47, # 31
+ 157,  45, # 32
+ 157,  40, # 33
+ 132,  45, # 34
+ 132,  40, # 35
+ 172,  45, # 36
+ 172,  40, # 37
+ 167,  45, # 38
+ 167,  40, # 39
+ 177,  45, # 40
+ 177,  40, # 41
+ 133,  40, # 42
+ 173,  40, # 43
+ 168,  40, # 44
+ 178,  40, # 45
+ 57,  45, # 46
+ 57,  40, # 47
+ 67,  45, # 48
+ 67,  40, # 49
+ 58,  40, # 50
+ 68,  40, # 51
+ 88, # 52
+ 88, # 53
+ 89, # 54
+ 89, # 55
+ 92,  46, # 56
+ 94, # 57
+ 94, # 58
+ 97,  47, # 59
+ 98,  47, # 60
+  2, # 61
+  3, # 62
+ 26, # 63
+ 27, # 64
+  4, # 65
+  5, # 66
+ 29, # 67
+  1, # 68
+ 31, # 69
+ 32, # 70
+ 33, # 71
+ 38, # 72
+ 28, # 73
+ 40, # 74
+ 40, # 75
+ 40, # 76
+ 42, # 77
+ 43, # 78
+ 45, # 79
+ 46, # 80
+ 47, # 81
+ 157, # 82
+ 132, # 83
+ 162, # 84
+ 107, # 85
+ 112, # 86
+ 172, # 87
+ 167, # 88
+ 177, # 89
+ 137, # 90
+ 147, # 91
+ 142, # 92
+ 152, # 93
+ 127, # 94
+ 122, # 95
+ 117, # 96
+ 158, # 97
+ 113, # 98
+ 133, # 99
+ 138, # 100
+ 148, # 101
+ 143, # 102
+ 153, # 103
+ 163, # 104
+ 173, # 105
+ 168, # 106
+ 178, # 107
+ 108, # 108
+ 123, # 109
+ 128, # 110
+ 118, # 111
+ 159, # 112
+ 134, # 113
+ 114, # 114
+ 164, # 115
+ 139, # 116
+ 149, # 117
+ 144, # 118
+ 154, # 119
+ 169, # 120
+ 174, # 121
+ 179, # 122
+ 109, # 123
+ 119, # 124
+ 124, # 125
+ 129, # 126
+ 57, # 127
+ 67, # 128
+ 62, # 129
+ 58, # 130
+ 68, # 131
+ 63, # 132
+ 59, # 133
+ 69, # 134
+ 64, # 135
+ 72, # 136
+ 73, # 137
+ 74, # 138
+ 77, # 139
+ 78, # 140
+ 79, # 141
+ 82, # 142
+ 83, # 143
+ 84, # 144
+ 92, # 145
+ 97, # 146
+ 98, # 147
+ 41, # 148
+  6, # 149
+ 15, # 150
+  8, # 151
+  9, # 152
+ 10, # 153
+ 13, # 154
+ 14, # 155
+ 12, # 156
+ 16, # 157
+ 17, # 158
+ 18, # 159
+ 19, # 160
+ 20, # 161
+ 21, # 162
+ 23, # 163
+};
+var codegen_registers: RegId[] := {
+0x800, 0x1, # 0
+0x800, 0x80, # 1
+0x1, # 2
+0x80, # 3
+0xffffffff, # 4
+0xffffffff, # 5
+0xffffffff, # 6
+0x1, # 7
+0x1, # 8
+0xffffffff, # 9
+0xffffffff, # 10
+0x80, # 11
+# 12
+0x1, # 13
+0x380, # 14
+0x400, # 15
+0x400, # 16
+# 17
+# 18
+# 19
+0x800, # 20
+0x800, 0x1, 0x100, # 21
+0x800, 0x80, 0x100, # 22
+# 23
+# 24
+# 25
+# 26
+# 27
+0x1, 0x380, # 28
+# 29
+0x300, 0x80, # 30
+0x400, 0x80, # 31
+0x1, 0x80, # 32
+0xffffffff, # 33
+0x1, 0x80, # 34
+0x1, # 35
+0x1, 0x80, # 36
+0x1, # 37
+0x1, 0x80, # 38
+0x1, # 39
+0x1, 0x80, # 40
+0x1, # 41
+0x380, # 42
+0x380, # 43
+0x380, # 44
+0x380, # 45
+0x1, 0x80, # 46
+0x1, # 47
+0x1, 0x80, # 48
+0x1, # 49
+0x80, # 50
+0x380, # 51
+0x1, # 52
+0x1, # 53
+0x1, # 54
+0x1, # 55
+0x80, # 56
+0x180, # 57
+0x180, # 58
+0x80, # 59
+0x80, # 60
+# 61
+# 62
+# 63
+# 64
+# 65
+# 66
+0x800, 0x100, # 67
+# 68
+0x800, 0x2b, # 69
+0x800, 0x380, # 70
+0x800, 0x400, # 71
+# 72
+# 73
+# 74
+# 75
+# 76
+# 77
+# 78
+0x380, # 79
+0x80, # 80
+0x80, # 81
+0x1, 0x2a, # 82
+0x1, 0x2a, # 83
+0x2, 0x8, # 84
+0x1, # 85
+0x2a, # 86
+0x1, 0x2a, # 87
+0x1, 0x2a, # 88
+0x1, 0x2a, # 89
+0x2, 0x8, # 90
+0x2, 0x8, # 91
+0x2, 0x8, # 92
+0x2, 0x8, # 93
+0x1, 0x2, # 94
+0x1, 0x2, # 95
+0x1, 0x2, # 96
+0x380, 0x380, # 97
+0x380, # 98
+0x380, 0x380, # 99
+0x100, 0x200, # 100
+0x100, 0x200, # 101
+0x100, 0x200, # 102
+0x100, 0x200, # 103
+0x80, 0x100, # 104
+0x380, 0x380, # 105
+0x380, 0x380, # 106
+0x380, 0x380, # 107
+0x380, # 108
+0x80, 0x2, # 109
+0x80, 0x2, # 110
+0x80, 0x2, # 111
+0x400, 0x400, # 112
+0x400, 0x400, # 113
+0x400, # 114
+0x400, 0x400, # 115
+0x400, 0x400, # 116
+0x400, 0x400, # 117
+0x400, 0x400, # 118
+0x400, 0x400, # 119
+0x400, 0x400, # 120
+0x400, 0x400, # 121
+0x400, 0x400, # 122
+0x400, # 123
+0x400, 0x2, # 124
+0x400, 0x2, # 125
+0x400, 0x2, # 126
+0x2a, 0x1, # 127
+0x1, 0x2a, # 128
+0x1, 0x2, # 129
+0x100, 0x80, # 130
+0x380, 0x380, # 131
+0x100, 0x80, # 132
+0x400, 0x400, # 133
+0x400, 0x400, # 134
+0x400, 0x400, # 135
+0x1, # 136
+0x100, # 137
+0x400, # 138
+# 139
+# 140
+# 141
+# 142
+# 143
+# 144
+0x380, # 145
+0x400, # 146
+0x400, # 147
+# 148
+# 149
+# 150
+# 151
+# 152
+# 153
+# 154
+# 155
+# 156
+# 157
+# 158
+# 159
+# 160
+# 161
+# 162
+# 163
+};
+var codegen_rules: Rule[] := {
+	{ 0x00, 0x0, 0x0, 0xfff, 19, 31, 12 }, # 0
+	{ 0x00, 0x0, 0x0, 0xfff, 19, 31, 12 }, # 1
+	{ 0x00, 0x0, 0x0, 0x0, 49, 51, 2 }, # 2
+	{ 0x00, 0x0, 0x0, 0x0, 49, 51, 2 }, # 3
+	{ 0x01, 0x2b, 0x2b, 0x0, 17, 19, 2 }, # 4
+	{ 0x01, 0x2b, 0x2b, 0x0, 17, 19, 2 }, # 5
+	{ 0x01, 0x2b, 0x2b, 0x0, 17, 19, 2 }, # 6
+	{ 0x01, 0x2b, 0x1, 0x0, 17, 19, 2 }, # 7
+	{ 0x01, 0x2b, 0x1, 0x0, 17, 19, 2 }, # 8
+	{ 0x01, 0x380, 0x380, 0x0, 17, 19, 2 }, # 9
+	{ 0x01, 0x380, 0x380, 0x0, 17, 19, 2 }, # 10
+	{ 0x01, 0x380, 0x80, 0x0, 17, 19, 2 }, # 11
+	{ 0x00, 0x0, 0x0, 0xfff, 19, 19, 0 }, # 12
+	{ 0x01, 0x0, 0x0, 0xfff, 17, 19, 2 }, # 13
+	{ 0x01, 0x0, 0x0, 0xfff, 17, 19, 2 }, # 14
+	{ 0x01, 0x0, 0x0, 0xfff, 17, 19, 2 }, # 15
+	{ 0x01, 0x0, 0x0, 0xfff, 17, 19, 2 }, # 16
+	{ 0x00, 0x2b, 0x1, 0x0, 7, 7, 0 }, # 17
+	{ 0x00, 0x2b, 0x1, 0x0, 7, 7, 0 }, # 18
+	{ 0x00, 0x380, 0x80, 0x0, 7, 7, 0 }, # 19
+	{ 0x00, 0x0, 0x0, 0xfff, 17, 19, 2 }, # 20
+	{ 0x00, 0x0, 0x0, 0xfff, 3, 31, 28 }, # 21
+	{ 0x00, 0x0, 0x0, 0xfff, 3, 31, 28 }, # 22
+	{ 0x01, 0x2b, 0x1, 0x0, 1, 1, 0 }, # 23
+	{ 0x01, 0x380, 0x80, 0x0, 1, 1, 0 }, # 24
+	{ 0x01, 0x2b, 0x2b, 0x0, 1, 1, 0 }, # 25
+	{ 0x01, 0x380, 0x380, 0x0, 1, 1, 0 }, # 26
+	{ 0x00, 0x2b, 0x1, 0x0, 3, 3, 0 }, # 27
+	{ 0x00, 0x0, 0x0, 0x0, 17, 51, 34 }, # 28
+	{ 0x00, 0x380, 0x80, 0x0, 3, 3, 0 }, # 29
+	{ 0x00, 0x0, 0x0, 0x1, 17, 51, 34 }, # 30
+	{ 0x00, 0x0, 0x0, 0xfff, 17, 51, 34 }, # 31
+	{ 0x00, 0x2b, 0x1, 0x0, 17, 51, 34 }, # 32
+	{ 0x00, 0x2b, 0x1, 0x0, 17, 19, 2 }, # 33
+	{ 0x00, 0x2b, 0x1, 0x0, 17, 51, 34 }, # 34
+	{ 0x00, 0x2b, 0x1, 0x0, 17, 19, 2 }, # 35
+	{ 0x00, 0x2b, 0x1, 0x0, 17, 51, 34 }, # 36
+	{ 0x00, 0x2b, 0x1, 0x0, 17, 19, 2 }, # 37
+	{ 0x00, 0x2b, 0x1, 0x0, 17, 51, 34 }, # 38
+	{ 0x00, 0x2b, 0x1, 0x0, 17, 19, 2 }, # 39
+	{ 0x00, 0x2b, 0x1, 0x0, 17, 51, 34 }, # 40
+	{ 0x00, 0x2b, 0x1, 0x0, 17, 19, 2 }, # 41
+	{ 0x00, 0x380, 0x380, 0x1, 17, 19, 2 }, # 42
+	{ 0x00, 0x380, 0x380, 0x1, 17, 19, 2 }, # 43
+	{ 0x00, 0x380, 0x380, 0x1, 17, 19, 2 }, # 44
+	{ 0x00, 0x380, 0x380, 0x1, 17, 19, 2 }, # 45
+	{ 0x00, 0x0, 0x0, 0xfff, 17, 51, 34 }, # 46
+	{ 0x00, 0x0, 0x0, 0xfff, 17, 19, 2 }, # 47
+	{ 0x00, 0x0, 0x0, 0xfff, 17, 51, 34 }, # 48
+	{ 0x00, 0x0, 0x0, 0xfff, 17, 19, 2 }, # 49
+	{ 0x00, 0x0, 0x0, 0xfff, 17, 19, 2 }, # 50
+	{ 0x00, 0x0, 0x0, 0xfff, 17, 19, 2 }, # 51
+	{ 0x01, 0x380, 0x380, 0x0, 1, 3, 2 }, # 52
+	{ 0x01, 0x380, 0x380, 0x0, 1, 3, 2 }, # 53
+	{ 0x01, 0x400, 0x400, 0xe0, 1, 3, 2 }, # 54
+	{ 0x01, 0x400, 0x400, 0x2e6, 1, 3, 2 }, # 55
+	{ 0x00, 0x2b, 0x2b, 0x0, 3, 7, 4 }, # 56
+	{ 0x01, 0x400, 0x400, 0x206, 1, 3, 2 }, # 57
+	{ 0x01, 0x400, 0x400, 0x207, 1, 3, 2 }, # 58
+	{ 0x00, 0x2b, 0x2b, 0x0, 3, 7, 4 }, # 59
+	{ 0x00, 0x380, 0x380, 0x0, 3, 7, 4 }, # 60
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 61
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 62
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 1, 0 }, # 63
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 1, 0 }, # 64
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 1, 0 }, # 65
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 1, 0 }, # 66
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 19, 18 }, # 67
+	{ 0x00, 0x800, 0x800, 0x0, 1, 1, 0 }, # 68
+	{ 0x00, 0x800, 0x800, 0x0, 1, 19, 18 }, # 69
+	{ 0x00, 0x800, 0x800, 0x0, 1, 19, 18 }, # 70
+	{ 0x00, 0x800, 0x800, 0x0, 1, 19, 18 }, # 71
+	{ 0x00, 0x400, 0x400, 0x0, 1, 1, 0 }, # 72
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 1, 0 }, # 73
+	{ 0x00, 0x2b, 0x2b, 0x0, 1, 1, 0 }, # 74
+	{ 0x00, 0x380, 0x380, 0x0, 1, 1, 0 }, # 75
+	{ 0x00, 0x400, 0x400, 0xe0, 1, 1, 0 }, # 76
+	{ 0x00, 0x380, 0x380, 0x0, 1, 1, 0 }, # 77
+	{ 0x00, 0x380, 0x380, 0x0, 1, 1, 0 }, # 78
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 3, 2 }, # 79
+	{ 0x00, 0x380, 0x380, 0x1, 1, 3, 2 }, # 80
+	{ 0x00, 0x400, 0x400, 0xfff, 1, 3, 2 }, # 81
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 19, 18 }, # 82
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 19, 18 }, # 83
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 19, 18 }, # 84
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 3, 2 }, # 85
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 3, 2 }, # 86
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 19, 18 }, # 87
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 19, 18 }, # 88
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 19, 18 }, # 89
+	{ 0x00, 0x2b, 0x2, 0x1, 1, 19, 18 }, # 90
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 19, 18 }, # 91
+	{ 0x00, 0x2b, 0x2, 0x1, 1, 19, 18 }, # 92
+	{ 0x00, 0x2b, 0x8, 0x0, 1, 19, 18 }, # 93
+	{ 0x00, 0x2b, 0x1, 0x206, 1, 19, 18 }, # 94
+	{ 0x00, 0x2b, 0x1, 0x206, 1, 19, 18 }, # 95
+	{ 0x00, 0x2b, 0x1, 0x206, 1, 19, 18 }, # 96
+	{ 0x00, 0x380, 0x80, 0x0, 1, 19, 18 }, # 97
+	{ 0x00, 0x380, 0x380, 0x1, 1, 3, 2 }, # 98
+	{ 0x00, 0x380, 0x380, 0x1, 1, 19, 18 }, # 99
+	{ 0x00, 0x380, 0x100, 0xe1, 1, 19, 18 }, # 100
+	{ 0x00, 0x380, 0x80, 0x1, 1, 19, 18 }, # 101
+	{ 0x00, 0x380, 0x100, 0xe1, 1, 19, 18 }, # 102
+	{ 0x00, 0x380, 0x80, 0xe1, 1, 19, 18 }, # 103
+	{ 0x00, 0x380, 0x80, 0x207, 1, 19, 18 }, # 104
+	{ 0x00, 0x380, 0x380, 0x1, 1, 19, 18 }, # 105
+	{ 0x00, 0x380, 0x380, 0x1, 1, 19, 18 }, # 106
+	{ 0x00, 0x380, 0x380, 0x1, 1, 19, 18 }, # 107
+	{ 0x00, 0x380, 0x380, 0x1, 1, 3, 2 }, # 108
+	{ 0x00, 0x380, 0x80, 0x1, 1, 19, 18 }, # 109
+	{ 0x00, 0x380, 0x80, 0x1, 1, 19, 18 }, # 110
+	{ 0x00, 0x380, 0x80, 0x1, 1, 19, 18 }, # 111
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 19, 18 }, # 112
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 19, 18 }, # 113
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 3, 2 }, # 114
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 19, 18 }, # 115
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 19, 18 }, # 116
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 19, 18 }, # 117
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 19, 18 }, # 118
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 19, 18 }, # 119
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 19, 18 }, # 120
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 19, 18 }, # 121
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 19, 18 }, # 122
+	{ 0x00, 0x400, 0x400, 0x3ff, 1, 3, 2 }, # 123
+	{ 0x00, 0x400, 0x400, 0x1f9, 1, 19, 18 }, # 124
+	{ 0x00, 0x400, 0x400, 0x1f9, 1, 19, 18 }, # 125
+	{ 0x00, 0x400, 0x400, 0x1f9, 1, 19, 18 }, # 126
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 19, 18 }, # 127
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 19, 18 }, # 128
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 19, 18 }, # 129
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 19, 18 }, # 130
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 19, 18 }, # 131
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 19, 18 }, # 132
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 19, 18 }, # 133
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 19, 18 }, # 134
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 19, 18 }, # 135
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 3, 2 }, # 136
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 3, 2 }, # 137
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 3, 2 }, # 138
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 1, 0 }, # 139
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 1, 0 }, # 140
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 1, 0 }, # 141
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 142
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 143
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 144
+	{ 0x00, 0x2b, 0x1, 0x0, 1, 3, 2 }, # 145
+	{ 0x00, 0x2b, 0x1, 0xe0, 1, 3, 2 }, # 146
+	{ 0x00, 0x380, 0x80, 0x206, 1, 3, 2 }, # 147
+	{ 0x00, 0x380, 0x380, 0x0, 1, 1, 0 }, # 148
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 149
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 150
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 151
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 152
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 153
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 154
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 155
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 156
+	{ 0x00, 0x0, 0x0, 0xfff, 1, 1, 0 }, # 157
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 158
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 159
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 160
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 161
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 162
+	{ 0x00, 0x0, 0x0, 0x0, 1, 1, 0 }, # 163
+};
+sub PopulateMatchBuffer(insn: [Instruction], n: [[Node]], matchbuf: [uint8]) is
+	[matchbuf+0] := [n + 0*@bytesof intptr].op;
+	[n + 1*@bytesof intptr] := [n + 0*@bytesof intptr].left;
+	if [n + 1*@bytesof intptr] != (0 as [Node]) then
+	[matchbuf+1] := [n + 1*@bytesof intptr].op;
+	[n + 2*@bytesof intptr] := [n + 1*@bytesof intptr].left;
+	if [n + 2*@bytesof intptr] != (0 as [Node]) then
+	[matchbuf+2] := [n + 2*@bytesof intptr].op;
+	end if;
+	[n + 3*@bytesof intptr] := [n + 1*@bytesof intptr].right;
+	if [n + 3*@bytesof intptr] != (0 as [Node]) then
+	[matchbuf+3] := [n + 3*@bytesof intptr].op;
+	end if;
+	end if;
+	[n + 4*@bytesof intptr] := [n + 0*@bytesof intptr].right;
+	if [n + 4*@bytesof intptr] != (0 as [Node]) then
+	[matchbuf+4] := [n + 4*@bytesof intptr].op;
+	[n + 5*@bytesof intptr] := [n + 4*@bytesof intptr].left;
+	if [n + 5*@bytesof intptr] != (0 as [Node]) then
+	[matchbuf+5] := [n + 5*@bytesof intptr].op;
+	end if;
+	end if;
+end sub;

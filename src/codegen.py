@@ -877,18 +877,145 @@ class CodeGenerator:
                 else:
                     self.emit(f"\tSHLD\t{mangled}")
 
+    def gen_condition_branch_true(self, cond: ast.Expression, true_label: str) -> None:
+        """Generate condition and branch to true_label if true."""
+        # For comparison, negate the jump condition
+        if isinstance(cond, ast.Comparison):
+            op = cond.op
+            is_zero_right = isinstance(cond.right, ast.NumberLiteral) and cond.right.value == 0
+            if is_zero_right and op in ('==', '!='):
+                self.gen_expr(cond.left, 'HL')
+                self.emit("\tMOV\tA,H")
+                self.emit("\tORA\tL")
+                if op == '==':
+                    self.emit(f"\tJZ\t{true_label}")
+                else:
+                    self.emit(f"\tJNZ\t{true_label}")
+                return
+
+            self.gen_expr(cond.left, 'HL')
+            self.emit("\tPUSH\tH")
+            self.gen_expr(cond.right, 'HL')
+            self.emit("\tXCHG")
+            self.emit("\tPOP\tH")
+            self.emit("\tMOV\tA,H")
+            self.emit("\tCMP\tD")
+            self.emit("\tJNZ\t$+6")
+            self.emit("\tMOV\tA,L")
+            self.emit("\tCMP\tE")
+            # Branch if true (opposite of gen_condition_branch)
+            if op == '==':
+                self.emit(f"\tJZ\t{true_label}")
+            elif op == '!=':
+                self.emit(f"\tJNZ\t{true_label}")
+            elif op == '<':
+                self.emit(f"\tJC\t{true_label}")
+            elif op == '>=':
+                self.emit(f"\tJNC\t{true_label}")
+            elif op == '>':
+                skip_lbl = self.new_label("SKIP")
+                self.emit(f"\tJZ\t{skip_lbl}")
+                self.emit(f"\tJNC\t{true_label}")
+                self.emit_label(skip_lbl)
+            elif op == '<=':
+                self.emit(f"\tJZ\t{true_label}")
+                self.emit(f"\tJC\t{true_label}")
+            return
+
+        if isinstance(cond, ast.NotOp):
+            # !x is true -> x is false
+            self.gen_condition_branch(cond.operand, true_label)
+            return
+
+        # Default: evaluate and test
+        self.gen_expr(cond, 'A')
+        self.emit("\tORA\tA")
+        self.emit(f"\tJNZ\t{true_label}")
+
+    def gen_condition_branch(self, cond: ast.Expression, false_label: str) -> None:
+        """Generate condition and branch to false_label if false."""
+        # Optimize: direct comparison branching
+        if isinstance(cond, ast.Comparison):
+            op = cond.op
+            # Check for comparison with zero
+            is_zero_right = isinstance(cond.right, ast.NumberLiteral) and cond.right.value == 0
+            if is_zero_right and op in ('==', '!='):
+                self.gen_expr(cond.left, 'HL')
+                self.emit("\tMOV\tA,H")
+                self.emit("\tORA\tL")
+                if op == '==':
+                    self.emit(f"\tJNZ\t{false_label}")
+                else:
+                    self.emit(f"\tJZ\t{false_label}")
+                return
+
+            # General comparison
+            self.gen_expr(cond.left, 'HL')
+            self.emit("\tPUSH\tH")
+            self.gen_expr(cond.right, 'HL')
+            self.emit("\tXCHG")
+            self.emit("\tPOP\tH")
+            self.emit("\tMOV\tA,H")
+            self.emit("\tCMP\tD")
+            self.emit("\tJNZ\t$+6")
+            self.emit("\tMOV\tA,L")
+            self.emit("\tCMP\tE")
+            # Branch based on comparison
+            if op == '==':
+                self.emit(f"\tJNZ\t{false_label}")
+            elif op == '!=':
+                self.emit(f"\tJZ\t{false_label}")
+            elif op == '<':
+                self.emit(f"\tJNC\t{false_label}")
+            elif op == '>=':
+                self.emit(f"\tJC\t{false_label}")
+            elif op == '>':
+                self.emit(f"\tJC\t{false_label}")
+                self.emit(f"\tJZ\t{false_label}")
+            elif op == '<=':
+                true_lbl = self.new_label("TRUE")
+                self.emit(f"\tJZ\t{true_lbl}")
+                self.emit(f"\tJNC\t{false_label}")
+                self.emit_label(true_lbl)
+            return
+
+        if isinstance(cond, ast.NotOp):
+            # !x -> branch if x is true
+            true_label = self.new_label("TRUE")
+            self.gen_condition_branch(cond.operand, true_label)
+            self.emit(f"\tJMP\t{false_label}")
+            self.emit_label(true_label)
+            return
+
+        if isinstance(cond, ast.BinaryOp):
+            if cond.op == 'and':
+                # a and b -> if !a goto false; if !b goto false
+                self.gen_condition_branch(cond.left, false_label)
+                self.gen_condition_branch(cond.right, false_label)
+                return
+            elif cond.op == 'or':
+                # a or b -> if a goto continue; if !b goto false
+                true_label = self.new_label("OR_TRUE")
+                self.gen_condition_branch_true(cond.left, true_label)
+                self.gen_condition_branch(cond.right, false_label)
+                self.emit_label(true_label)
+                return
+
+        # Default: evaluate and test
+        self.gen_expr(cond, 'A')
+        self.emit("\tORA\tA")
+        self.emit(f"\tJZ\t{false_label}")
+
     def gen_if(self, stmt: ast.IfStmt) -> None:
         """Generate if statement."""
         else_label = self.new_label("ELSE")
         end_label = self.new_label("ENDIF")
 
-        # Condition
-        self.gen_expr(stmt.condition, 'A')
-        self.emit("\tORA\tA")
+        # Condition - use optimized branch
         if stmt.elseifs or stmt.else_body:
-            self.emit(f"\tJZ\t{else_label}")
+            self.gen_condition_branch(stmt.condition, else_label)
         else:
-            self.emit(f"\tJZ\t{end_label}")
+            self.gen_condition_branch(stmt.condition, end_label)
 
         # Then body
         for s in stmt.then_body:
@@ -902,9 +1029,8 @@ class CodeGenerator:
             next_label = self.new_label("ELIF") if i < len(stmt.elseifs) - 1 or stmt.else_body else end_label
             else_label = next_label
 
-            self.gen_expr(cond, 'A')
-            self.emit("\tORA\tA")
-            self.emit(f"\tJZ\t{next_label}")
+            # Use optimized condition branching
+            self.gen_condition_branch(cond, next_label)
 
             for s in body:
                 self.gen_stmt(s)
@@ -927,9 +1053,8 @@ class CodeGenerator:
         self.continue_labels.append(loop_label)
 
         self.emit_label(loop_label)
-        self.gen_expr(stmt.condition, 'A')
-        self.emit("\tORA\tA")
-        self.emit(f"\tJZ\t{end_label}")
+        # Use optimized condition branching
+        self.gen_condition_branch(stmt.condition, end_label)
 
         for s in stmt.body:
             self.gen_stmt(s)
@@ -1349,6 +1474,59 @@ class CodeGenerator:
                 i += 2
                 optimizations += 1
                 continue
+
+            # Pattern: LHLD x / PUSH H / LXI H,const / XCHG / POP H / DAD D -> LHLD x / LXI D,const / DAD D
+            if (curr.startswith("LHLD\t") and next1 == "PUSH\tH" and
+                next2.startswith("LXI\tH,") and next3 == "XCHG"):
+                next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
+                next5 = lines[i + 5].strip() if i + 5 < len(lines) else ""
+                if next4 == "POP\tH" and next5 == "DAD\tD":
+                    const = next2[6:]
+                    result.append(lines[i])  # LHLD x
+                    result.append(f"\tLXI\tD,{const}")
+                    result.append("\tDAD\tD")
+                    i += 6
+                    optimizations += 1
+                    continue
+
+            # Pattern: PUSH H / LXI H,const / XCHG / POP H / DAD D / SHLD x -> LXI D,const / DAD D / SHLD x
+            if (curr == "PUSH\tH" and next1.startswith("LXI\tH,") and
+                next2 == "XCHG" and next3 == "POP\tH"):
+                next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
+                if next4 == "DAD\tD":
+                    const = next1[6:]
+                    result.append(f"\tLXI\tD,{const}")
+                    result.append("\tDAD\tD")
+                    i += 5
+                    optimizations += 1
+                    continue
+
+            # Pattern: MOV L,A / MVI H,0 / PUSH H / CALL x / POP D -> use A directly for 8-bit arg
+            # This is complex, skip for now
+
+            # Pattern: LDA x / MOV L,A / MVI H,0 / MOV A,H / ORA L -> LDA x / ORA A (test for zero)
+            if curr.startswith("LDA\t"):
+                if next1 == "MOV\tL,A" and next2 == "MVI\tH,0" and next3 == "MOV\tA,H":
+                    next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
+                    if next4 == "ORA\tL":
+                        result.append(lines[i])  # LDA x
+                        result.append("\tORA\tA")
+                        i += 5
+                        optimizations += 1
+                        continue
+
+            # Pattern: PUSH PSW / MVI A,const / MOV B,A / POP PSW / ADD B -> ADI const
+            if curr == "PUSH\tPSW" and next1.startswith("MVI\tA,") and next2 == "MOV\tB,A" and next3 == "POP\tPSW":
+                next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
+                if next4 == "ADD\tB":
+                    const = next1[6:]
+                    result.append(f"\tADI\t{const}")
+                    i += 5
+                    optimizations += 1
+                    continue
+
+            # Pattern: MOV A,L (or LDA x) / STA y / ... / LDA y where A still has value
+            # Complex tracking needed, skip
 
             # No optimization applied - keep the line
             result.append(lines[i])

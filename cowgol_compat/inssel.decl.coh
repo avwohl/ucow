@@ -1,0 +1,43 @@
+typedef Word is uint16;
+record Operand is end record;
+const INSTRUCTION_TEMPLATE_DEPTH := 6;
+const INSTRUCTION_TEMPLATE_COUNT := 164;
+const REGISTER_COUNT := 12;
+const ALL_REGS := 0xfff;
+const OPERAND_REGS := 0x0;
+typedef RegId is int(0, ALL_REGS);
+typedef NodeBitmap is int(0, 0x3f);
+record Register is
+	name: string;
+	id: RegId;
+	uses: RegId;
+	compatible: RegId;
+	is_stacked: uint8;
+end record;
+const REG_PARAM := 0x800;
+const REG_STK4 := 0x400;
+const REG_BC := 0x200;
+const REG_DE := 0x100;
+const REG_HL := 0x80;
+const REG_L := 0x40;
+const REG_H := 0x20;
+const REG_E := 0x10;
+const REG_D := 0x8;
+const REG_C := 0x4;
+const REG_B := 0x2;
+const REG_A := 0x1;
+const REGCLASS_ALL := 0xffffffff;
+var registers: Register[] := {
+	{ "param", 0x800, 0x800, 0x800, 1 },
+	{ "stk4", 0x400, 0x400, 0x400, 1 },
+	{ "bc", 0x200, 0x206, 0x380, 0 },
+	{ "de", 0x100, 0x118, 0x380, 0 },
+	{ "hl", 0x80, 0xe0, 0x380, 0 },
+	{ "l", 0x40, 0x40, 0x40, 0 },
+	{ "h", 0x20, 0xe0, 0x2b, 0 },
+	{ "e", 0x10, 0x10, 0x10, 0 },
+	{ "d", 0x8, 0x118, 0x2b, 0 },
+	{ "c", 0x4, 0x4, 0x4, 0 },
+	{ "b", 0x2, 0x206, 0x2b, 0 },
+	{ "a", 0x1, 0x1, 0x2b, 0 },
+};

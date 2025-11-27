@@ -64,6 +64,13 @@ class ScalarType(Type):
 
 
 @dataclass
+class RangedIntType(Type):
+    """Ranged integer type: int(min, max)."""
+    min_expr: 'Expression'
+    max_expr: 'Expression'
+
+
+@dataclass
 class PointerType(Type):
     """Pointer type: [T]."""
     target: Type

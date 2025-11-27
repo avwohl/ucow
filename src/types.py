@@ -310,6 +310,30 @@ class TypeChecker:
                     return UINT8
             return UINT16
 
+        elif isinstance(node, ast.RangedIntType):
+            # int(min, max) - choose smallest integer type that fits the range
+            min_val = self.eval_const(node.min_expr)
+            max_val = self.eval_const(node.max_expr)
+            if min_val is None:
+                min_val = 0
+            if max_val is None:
+                max_val = 65535
+            # Determine type based on range
+            if min_val >= 0:
+                if max_val <= 255:
+                    return UINT8
+                elif max_val <= 65535:
+                    return UINT16
+                else:
+                    return UINT32
+            else:
+                if min_val >= -128 and max_val <= 127:
+                    return INT8
+                elif min_val >= -32768 and max_val <= 32767:
+                    return INT16
+                else:
+                    return INT32
+
         else:
             self.error(f"Cannot resolve type: {type(node).__name__}", node.location)
             return UINT8
@@ -320,6 +344,9 @@ class TypeChecker:
             return expr.value
 
         elif isinstance(expr, ast.Identifier):
+            # Check constants dictionary first
+            if expr.name in self.constants:
+                return self.constants[expr.name]
             info = self.current_scope.lookup_var(expr.name)
             if info and info.is_const and info.const_value is not None:
                 return info.const_value
@@ -819,6 +846,13 @@ class TypeChecker:
 
     def check_program(self, program: ast.Program) -> bool:
         """Type-check an entire program."""
+        # Pass 0: collect constants first (needed for array sizes in type declarations)
+        for stmt in program.statements:
+            if isinstance(stmt, ast.ConstDecl):
+                value = self.eval_const(stmt.value)
+                if value is not None:
+                    self.constants[stmt.name] = value
+
         # First pass: collect type declarations (records, typedefs, interfaces)
         for decl in program.declarations:
             if isinstance(decl, ast.RecordDecl):

@@ -112,6 +112,15 @@ class Parser:
         # Named type (record, typedef)
         if self._at(TokenType.ID):
             name = self._advance().value
+            # Handle ranged integer type: int(min, max)
+            if name == 'int' and self._match(TokenType.LPAREN):
+                # Parse min expression
+                min_expr = self._parse_expression()
+                self._expect(TokenType.COMMA, "Expected ',' in int(min, max)")
+                # Parse max expression
+                max_expr = self._parse_expression()
+                self._expect(TokenType.RPAREN, "Expected ')' in int(min, max)")
+                return ast.RangedIntType(loc, min_expr, max_expr)
             return ast.NamedType(loc, name)
 
         raise ParseError("Expected type", loc)
@@ -185,6 +194,17 @@ class Parser:
                 target = self._parse_unary()
                 return ast.SizeOf(loc, target)
             elif name == 'bytesof':
+                # @bytesof can take a type name or expression
+                # Check for type keywords first
+                scalar_types = {
+                    TokenType.INT8: 'int8', TokenType.UINT8: 'uint8',
+                    TokenType.INT16: 'int16', TokenType.UINT16: 'uint16',
+                    TokenType.INT32: 'int32', TokenType.UINT32: 'uint32',
+                    TokenType.INTPTR: 'intptr',
+                }
+                for tt, tname in scalar_types.items():
+                    if self._match(tt):
+                        return ast.BytesOf(loc, ast.Identifier(loc, tname))
                 target = self._parse_unary()
                 return ast.BytesOf(loc, target)
             elif name == 'indexof':
