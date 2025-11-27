@@ -45,10 +45,24 @@ class CodeGenerator:
         self.current_sub: Optional[str] = None
         self.break_labels: List[str] = []
         self.continue_labels: List[str] = []
+        # Register tracking for optimization
+        self.hl_contains: Optional[str] = None  # Variable name or None
+        self.a_contains: Optional[str] = None   # Variable name or None
+
+    def invalidate_regs(self) -> None:
+        """Invalidate register tracking (after calls, jumps, etc)."""
+        self.hl_contains = None
+        self.a_contains = None
 
     def emit(self, line: str) -> None:
         """Emit an assembly line."""
         self.output.append(line)
+        # Invalidate tracking for instructions that modify HL or A
+        stripped = line.strip().upper()
+        if any(stripped.startswith(x) for x in ['CALL', 'POP', 'DAD', 'INX', 'DCX', 'XCHG']):
+            self.hl_contains = None
+        if any(stripped.startswith(x) for x in ['CALL', 'POP', 'ADD', 'SUB', 'ANA', 'ORA', 'XRA', 'INR', 'DCR', 'CMA', 'RAL', 'RAR', 'MVI\tA']):
+            self.a_contains = None
 
     def emit_label(self, label: str) -> None:
         """Emit a label."""
@@ -407,6 +421,29 @@ class CodeGenerator:
     def gen_comparison(self, expr: ast.Comparison) -> None:
         """Generate comparison, result in A (0 or 1)."""
         op = expr.op
+
+        # Check for comparison with zero - can optimize
+        is_zero_right = isinstance(expr.right, ast.NumberLiteral) and expr.right.value == 0
+        is_zero_left = isinstance(expr.left, ast.NumberLiteral) and expr.left.value == 0
+
+        # Optimize: x == 0 or x != 0
+        if is_zero_right and op in ('==', '!='):
+            self.gen_expr(expr.left, 'HL')
+            self.emit("\tMOV\tA,H")
+            self.emit("\tORA\tL")
+            if op == '==':
+                # Result is 1 if zero, 0 if nonzero
+                end = self.new_label("END")
+                self.emit(f"\tJNZ\t{end}")
+                self.emit("\tMVI\tA,1")
+                self.emit_label(end)
+            else:  # !=
+                # Result is 0 if zero, 1 if nonzero
+                end = self.new_label("END")
+                self.emit(f"\tJZ\t{end}")
+                self.emit("\tMVI\tA,1")
+                self.emit_label(end)
+            return
 
         # Generate both sides
         self.gen_expr(expr.left, 'HL')
@@ -1142,7 +1179,182 @@ class CodeGenerator:
         self.emit("")
         self.emit("\tEND")
 
+        # Apply peephole optimizations iteratively until no more changes
+        prev_len = len(self.output) + 1
+        passes = 0
+        while len(self.output) < prev_len and passes < 10:
+            prev_len = len(self.output)
+            self.output = self.peephole_optimize(self.output)
+            passes += 1
+
         return '\n'.join(self.output)
+
+    def peephole_optimize(self, lines: List[str]) -> List[str]:
+        """Apply peephole optimizations to reduce code size."""
+        result = []
+        i = 0
+        optimizations = 0
+
+        while i < len(lines):
+            # Get current and next few lines for pattern matching
+            curr = lines[i].strip()
+            next1 = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            next2 = lines[i + 2].strip() if i + 2 < len(lines) else ""
+            next3 = lines[i + 3].strip() if i + 3 < len(lines) else ""
+
+            # Pattern: PUSH H / POP H -> remove both (no-op)
+            if curr == "PUSH\tH" and next1 == "POP\tH":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: PUSH D / POP D -> remove both (no-op)
+            if curr == "PUSH\tD" and next1 == "POP\tD":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: PUSH PSW / POP PSW -> remove both (no-op)
+            if curr == "PUSH\tPSW" and next1 == "POP\tPSW":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: MOV A,L / MOV L,A -> remove second (redundant)
+            if curr == "MOV\tA,L" and next1 == "MOV\tL,A":
+                result.append(lines[i])
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: MOV L,A / MOV A,L -> remove second (redundant)
+            if curr == "MOV\tL,A" and next1 == "MOV\tA,L":
+                result.append(lines[i])
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: SHLD x / LHLD x -> remove LHLD (HL already has value)
+            if curr.startswith("SHLD\t"):
+                var = curr[5:]
+                if next1 == f"LHLD\t{var}":
+                    result.append(lines[i])
+                    i += 2
+                    optimizations += 1
+                    continue
+
+            # Pattern: STA x / LDA x -> remove LDA (A already has value)
+            if curr.startswith("STA\t"):
+                var = curr[4:]
+                if next1 == f"LDA\t{var}":
+                    result.append(lines[i])
+                    i += 2
+                    optimizations += 1
+                    continue
+
+            # Pattern: LXI H,x / SHLD y / LHLD y -> LXI H,x / SHLD y
+            if curr.startswith("LXI\tH,"):
+                if next1.startswith("SHLD\t"):
+                    var = next1[5:]
+                    if next2 == f"LHLD\t{var}":
+                        result.append(lines[i])
+                        result.append(lines[i + 1])
+                        i += 3
+                        optimizations += 1
+                        continue
+
+            # Pattern: MVI A,x / STA y / LDA y -> MVI A,x / STA y
+            if curr.startswith("MVI\tA,"):
+                if next1.startswith("STA\t"):
+                    var = next1[4:]
+                    if next2 == f"LDA\t{var}":
+                        result.append(lines[i])
+                        result.append(lines[i + 1])
+                        i += 3
+                        optimizations += 1
+                        continue
+
+            # Pattern: LXI H,0 / DAD D -> XCHG (when just want DE in HL)
+            # Can't do this safely without knowing context
+
+            # Pattern: CALL sub / RET -> JMP sub (tail call)
+            if curr.startswith("CALL\t") and next1 == "RET":
+                sub = curr[5:]
+                result.append(f"\tJMP\t{sub}")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: MVI H,0 after MOV L,A (common for 8->16 extension)
+            # Keep as is - needed for proper zero extension
+
+            # Pattern: JMP to next instruction -> remove
+            if curr.startswith("JMP\t"):
+                target = curr[4:]
+                if next1 == f"{target}:":
+                    i += 1
+                    optimizations += 1
+                    continue
+
+            # Pattern: LXI H,x / LXI H,y -> keep only second
+            if curr.startswith("LXI\tH,") and next1.startswith("LXI\tH,"):
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: MVI A,x / MVI A,y -> keep only second
+            if curr.startswith("MVI\tA,") and next1.startswith("MVI\tA,"):
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: XRA A / MVI A,0 -> keep only XRA A
+            if curr == "XRA\tA" and next1 == "MVI\tA,0":
+                result.append(lines[i])
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: MVI A,0 / XRA A -> keep only XRA A (shorter)
+            if curr == "MVI\tA,0" and next1 == "XRA\tA":
+                i += 1  # Skip MVI, keep XRA
+                optimizations += 1
+                continue
+
+            # Pattern: ORA A / ORA A -> keep one
+            if curr == "ORA\tA" and next1 == "ORA\tA":
+                result.append(lines[i])
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: RET / RET -> keep one
+            if curr == "RET" and next1 == "RET":
+                result.append(lines[i])
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: MOV L,A / MVI H,0 / MOV L,A / MVI H,0 -> keep first pair
+            if curr == "MOV\tL,A" and next1 == "MVI\tH,0" and next2 == "MOV\tL,A" and next3 == "MVI\tH,0":
+                result.append(lines[i])
+                result.append(lines[i + 1])
+                i += 4
+                optimizations += 1
+                continue
+
+            # Pattern: consecutive identical instructions -> keep one
+            if curr == next1 and curr not in ["RET", ""] and not curr.endswith(":"):
+                result.append(lines[i])
+                i += 2
+                optimizations += 1
+                continue
+
+            # No optimization applied - keep the line
+            result.append(lines[i])
+            i += 1
+
+        return result
 
 
 def generate(program: ast.Program, checker: TypeChecker) -> str:

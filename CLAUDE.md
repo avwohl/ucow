@@ -7,8 +7,10 @@ ucow is a Python-based Cowgol compiler that targets the 8080/Z80 CP/M platform. 
 
 ### Terminal Safety
 - **NEVER output binary file contents to the terminal** - this can put the terminal in graphics mode
+- **NEVER run cpmemu or other emulators in background** - they may output control characters
 - Use `wc -c` to check file sizes instead of `cat` or `head` on binary files
 - Use `hexdump -C file | head` only when necessary and with limited output
+- Avoid `head` or `tail` on .rel files - they are binary
 
 ### Build Commands
 ```bash
