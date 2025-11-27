@@ -4,4 +4,5 @@ __pycache__/
 *.com
 *.prn
 *.mac
+*.bak
 /tmp/

@@ -1,4 +1,19 @@
-"""8080 code generator for Cowgol."""
+"""Z80 code generator for Cowgol.
+
+Instruction reference (bytes/cycles):
+  Z80 vs 8080 differences to note:
+  - LD r,r (1/4) vs MOV (1/5) - Z80 faster
+  - ADD HL,rp (1/11) vs DAD (1/10) - 8080 faster!
+  - INC rp (1/6) vs INX (1/5) - 8080 faster!
+  - DEC rp (1/6) vs DCX (1/5) - 8080 faster!
+  - JP (3/10) vs JMP (3/10) - same
+  - JR (2/12) - saves byte but slower than JP!
+  - DJNZ (2/13|8) - great for loops (vs DCR+JNZ = 4 bytes)
+  - NEG (2/8) - negate A
+  - LDIR (2/21) - block copy
+
+See docs/z80_8080_reference.md for full details.
+"""
 
 from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass, field
@@ -31,8 +46,19 @@ class Variable:
     size: int
 
 
+@dataclass
+class InlineCandidate:
+    """Info about a subroutine that might be inlined."""
+    name: str
+    decl: ast.SubDecl
+    body_size: int  # Estimated size in bytes
+    has_local_vars: bool
+    has_loops: bool
+    call_count: int = 0  # Number of call sites
+
+
 class CodeGenerator:
-    """Generate 8080 assembly from Cowgol AST."""
+    """Generate Z80 assembly from Cowgol AST."""
 
     def __init__(self, checker: TypeChecker):
         self.checker = checker
@@ -40,6 +66,7 @@ class CodeGenerator:
         self.data: List[str] = []
         self.variables: Dict[str, Variable] = {}
         self.string_literals: Dict[str, str] = {}  # value -> label
+        self.array_initializers: Dict[str, tuple] = {}  # name -> (values, elem_size)
         self.data_offset = 0
         self.label_counter = 0
         self.current_sub: Optional[str] = None
@@ -48,25 +75,218 @@ class CodeGenerator:
         # Register tracking for optimization
         self.hl_contains: Optional[str] = None  # Variable name or None
         self.a_contains: Optional[str] = None   # Variable name or None
+        # Inlining support
+        self.inline_candidates: Dict[str, InlineCandidate] = {}
+        self.inlined_subs: Set[str] = set()  # Subs that were inlined (don't generate)
+        self.generating_inline: bool = False  # True when generating inline code
 
     def invalidate_regs(self) -> None:
         """Invalidate register tracking (after calls, jumps, etc)."""
         self.hl_contains = None
         self.a_contains = None
 
+    # === Inlining analysis ===
+
+    def analyze_for_inlining(self, program: ast.Program) -> None:
+        """Analyze program to find subroutines suitable for inlining."""
+        # First pass: find small subroutines
+        for decl in program.declarations:
+            if isinstance(decl, ast.SubDecl) and decl.body:
+                candidate = self._analyze_sub_for_inline(decl)
+                if candidate:
+                    self.inline_candidates[decl.name] = candidate
+
+        # Second pass: count call sites
+        self._count_calls_in_stmts(program.statements)
+        for decl in program.declarations:
+            if isinstance(decl, ast.SubDecl) and decl.body:
+                self._count_calls_in_stmts(decl.body)
+
+        # Decide which to inline based on SIZE reduction (not speed).
+        # Original: body_size + N * 3 (CALL) + 1 (RET) = body_size + 3*N + 1
+        # Inlined:  N * body_size (body duplicated N times, no CALL/RET)
+        # Inline if: N * body_size < body_size + 3*N + 1
+        #         -> (N-1) * body_size < 3*N + 1
+        # For N=1: 0 < 4, always true (inline subs called once)
+        # For N=2: body_size < 7
+        # For N=3: 2*body_size < 10 -> body_size < 5
+        # For N>=4: body_size <= 4
+        for name, candidate in self.inline_candidates.items():
+            n = candidate.call_count
+            if n == 0:
+                continue  # Not called, don't inline (will be dead code)
+            body = candidate.body_size
+            # Calculate size with and without inlining
+            size_with_sub = body + 3 * n + 1  # body + N calls + RET
+            size_inlined = n * body           # body repeated N times
+            if size_inlined < size_with_sub:
+                self.inlined_subs.add(name)
+
+    def _analyze_sub_for_inline(self, decl: ast.SubDecl) -> Optional[InlineCandidate]:
+        """Analyze a subroutine to see if it's a candidate for inlining."""
+        if not decl.body:
+            return None
+
+        # Don't inline subs with parameters or return values (complex setup)
+        sub_info = self.checker.subroutines.get(decl.name)
+        if sub_info and (sub_info.params or sub_info.returns):
+            return None
+
+        # Check for local variable declarations and loops
+        has_local_vars = False
+        has_loops = False
+        body_size = 0
+
+        for stmt in decl.body:
+            has_local_vars, has_loops, size = self._analyze_stmt_for_inline(
+                stmt, has_local_vars, has_loops
+            )
+            body_size += size
+
+        # Don't inline if has local vars (need allocation) or loops (break/continue issues)
+        if has_local_vars or has_loops:
+            return None
+
+        # Don't inline if body is too large (> 20 bytes)
+        if body_size > 20:
+            return None
+
+        return InlineCandidate(
+            name=decl.name,
+            decl=decl,
+            body_size=body_size,
+            has_local_vars=has_local_vars,
+            has_loops=has_loops
+        )
+
+    def _analyze_stmt_for_inline(self, stmt: ast.Statement,
+                                  has_local_vars: bool,
+                                  has_loops: bool) -> Tuple[bool, bool, int]:
+        """Analyze statement for inlining. Returns (has_local_vars, has_loops, size_estimate)."""
+        size = 0
+
+        if isinstance(stmt, ast.VarDecl):
+            has_local_vars = True
+            size = 3  # Approximate
+
+        elif isinstance(stmt, ast.Assignment):
+            # Estimate: load value (3-6) + store (3)
+            size = 6
+
+        elif isinstance(stmt, ast.ExprStmt):
+            if isinstance(stmt.expr, ast.Call):
+                size = 6  # CALL + stack cleanup
+            else:
+                size = 3
+
+        elif isinstance(stmt, ast.ReturnStmt):
+            size = 1  # RET
+
+        elif isinstance(stmt, ast.WhileStmt):
+            has_loops = True
+            size = 10
+
+        elif isinstance(stmt, ast.LoopStmt):
+            has_loops = True
+            size = 10
+
+        elif isinstance(stmt, ast.IfStmt):
+            size = 6
+            for s in stmt.then_body:
+                has_local_vars, has_loops, s_size = self._analyze_stmt_for_inline(
+                    s, has_local_vars, has_loops
+                )
+                size += s_size
+            if stmt.else_body:
+                for s in stmt.else_body:
+                    has_local_vars, has_loops, s_size = self._analyze_stmt_for_inline(
+                        s, has_local_vars, has_loops
+                    )
+                    size += s_size
+
+        elif isinstance(stmt, ast.AsmStmt):
+            # Count assembly parts
+            size = len([p for p in stmt.parts if isinstance(p, str)])
+
+        return has_local_vars, has_loops, size
+
+    def _count_calls_in_stmts(self, stmts: List[ast.Statement]) -> None:
+        """Count calls to inline candidates in statements."""
+        for stmt in stmts:
+            self._count_calls_in_stmt(stmt)
+
+    def _count_calls_in_stmt(self, stmt: ast.Statement) -> None:
+        """Count calls in a single statement."""
+        if isinstance(stmt, ast.ExprStmt):
+            self._count_calls_in_expr(stmt.expr)
+        elif isinstance(stmt, ast.Assignment):
+            self._count_calls_in_expr(stmt.value)
+        elif isinstance(stmt, ast.IfStmt):
+            self._count_calls_in_expr(stmt.condition)
+            self._count_calls_in_stmts(stmt.then_body)
+            for cond, body in stmt.elseifs:
+                self._count_calls_in_expr(cond)
+                self._count_calls_in_stmts(body)
+            if stmt.else_body:
+                self._count_calls_in_stmts(stmt.else_body)
+        elif isinstance(stmt, ast.WhileStmt):
+            self._count_calls_in_expr(stmt.condition)
+            self._count_calls_in_stmts(stmt.body)
+        elif isinstance(stmt, ast.LoopStmt):
+            self._count_calls_in_stmts(stmt.body)
+        elif isinstance(stmt, ast.CaseStmt):
+            self._count_calls_in_expr(stmt.expr)
+            for vals, body in stmt.whens:
+                self._count_calls_in_stmts(body)
+            if stmt.else_body:
+                self._count_calls_in_stmts(stmt.else_body)
+
+    def _count_calls_in_expr(self, expr: ast.Expression) -> None:
+        """Count calls in an expression."""
+        if expr is None:
+            return
+        if isinstance(expr, ast.Call):
+            if isinstance(expr.target, ast.Identifier):
+                name = expr.target.name
+                if name in self.inline_candidates:
+                    self.inline_candidates[name].call_count += 1
+            for arg in expr.args:
+                self._count_calls_in_expr(arg)
+        elif isinstance(expr, ast.BinaryOp):
+            self._count_calls_in_expr(expr.left)
+            self._count_calls_in_expr(expr.right)
+        elif isinstance(expr, ast.UnaryOp):
+            self._count_calls_in_expr(expr.operand)
+        elif isinstance(expr, ast.Comparison):
+            self._count_calls_in_expr(expr.left)
+            self._count_calls_in_expr(expr.right)
+        elif isinstance(expr, ast.LogicalOp):
+            self._count_calls_in_expr(expr.left)
+            self._count_calls_in_expr(expr.right)
+        elif isinstance(expr, ast.NotOp):
+            self._count_calls_in_expr(expr.operand)
+        elif isinstance(expr, ast.ArrayAccess):
+            self._count_calls_in_expr(expr.array)
+            self._count_calls_in_expr(expr.index)
+
     def emit(self, line: str) -> None:
         """Emit an assembly line."""
         self.output.append(line)
         # Invalidate tracking for instructions that modify HL or A
         stripped = line.strip().upper()
-        if any(stripped.startswith(x) for x in ['CALL', 'POP', 'DAD', 'INX', 'DCX', 'XCHG']):
+        # HL-modifying instructions (Z80 mnemonics)
+        if any(stripped.startswith(x) for x in ['CALL', 'POP', 'ADD\tHL', 'INC\tHL', 'DEC\tHL', 'EX\tDE', 'LD\tHL', 'LD\tH', 'LD\tL']):
             self.hl_contains = None
-        if any(stripped.startswith(x) for x in ['CALL', 'POP', 'ADD', 'SUB', 'ANA', 'ORA', 'XRA', 'INR', 'DCR', 'CMA', 'RAL', 'RAR', 'MVI\tA']):
+        # A-modifying instructions (Z80 mnemonics)
+        if any(stripped.startswith(x) for x in ['CALL', 'POP', 'ADD\tA', 'ADC\tA', 'SUB', 'SBC', 'AND', 'OR', 'XOR', 'INC\tA', 'DEC\tA', 'CPL', 'RLA', 'RRA', 'LD\tA', 'CP']):
             self.a_contains = None
 
     def emit_label(self, label: str) -> None:
         """Emit a label."""
         self.output.append(f"{label}:")
+        # Invalidate register tracking at labels - we might jump here from elsewhere
+        self.hl_contains = None
+        self.a_contains = None
 
     def emit_data(self, line: str) -> None:
         """Emit a data line."""
@@ -102,10 +322,43 @@ class CodeGenerator:
         # and reserved words
         return f"v_{name}"
 
+    def eval_const_expr(self, expr) -> Optional[int]:
+        """Try to evaluate an expression as a compile-time constant.
+        Returns the integer value if constant, None otherwise."""
+        if isinstance(expr, ast.NumberLiteral):
+            return expr.value
+        elif isinstance(expr, ast.Identifier):
+            if expr.name in self.checker.constants:
+                return self.checker.constants[expr.name]
+        elif isinstance(expr, ast.UnaryOp):
+            operand = self.eval_const_expr(expr.operand)
+            if operand is not None:
+                if expr.op == '-':
+                    return -operand & 0xFFFF
+                elif expr.op == '~':
+                    return ~operand & 0xFFFF
+        elif isinstance(expr, ast.BinaryOp):
+            left = self.eval_const_expr(expr.left)
+            right = self.eval_const_expr(expr.right)
+            if left is not None and right is not None:
+                if expr.op == '+':
+                    return (left + right) & 0xFFFF
+                elif expr.op == '-':
+                    return (left - right) & 0xFFFF
+                elif expr.op == '*':
+                    return (left * right) & 0xFFFF
+                elif expr.op == '|':
+                    return left | right
+                elif expr.op == '&':
+                    return left & right
+                elif expr.op == '^':
+                    return left ^ right
+        return None
+
     def mangle_sub_name(self, name: str) -> str:
-        """Mangle a subroutine name to avoid conflicts with 8080 registers."""
-        # Only mangle if it conflicts with 8080 register names
-        if name.upper() in ('A', 'B', 'C', 'D', 'E', 'H', 'L', 'M', 'SP', 'PSW'):
+        """Mangle a subroutine name to avoid conflicts with Z80 registers."""
+        # Only mangle if it conflicts with Z80 register names
+        if name.upper() in ('A', 'B', 'C', 'D', 'E', 'H', 'L', 'M', 'SP', 'AF', 'BC', 'DE', 'HL', 'IX', 'IY'):
             return f"s_{name}"
         return name
 
@@ -114,50 +367,67 @@ class CodeGenerator:
     def gen_expr(self, expr: ast.Expression, target: str = 'HL') -> None:
         """Generate code to evaluate expression, result in target (HL or A)."""
 
+        # Try constant folding first - evaluate at compile time if possible
+        const_val = self.eval_const_expr(expr)
+        if const_val is not None:
+            if target == 'A':
+                self.emit(f"\tLD\tA,{const_val & 0xFF}")
+            else:
+                self.emit(f"\tLD\tHL,{const_val & 0xFFFF}")
+            return
+
         if isinstance(expr, ast.NumberLiteral):
             value = expr.value
             if target == 'A':
-                self.emit(f"\tMVI\tA,{value & 0xFF}")
+                self.emit(f"\tLD\tA,{value & 0xFF}")
             else:
-                self.emit(f"\tLXI\tH,{value & 0xFFFF}")
+                self.emit(f"\tLD\tHL,{value & 0xFFFF}")
 
         elif isinstance(expr, ast.StringLiteral):
             label = self.get_string_label(expr.value)
-            self.emit(f"\tLXI\tH,{label}")
+            self.emit(f"\tLD\tHL,{label}")
 
         elif isinstance(expr, ast.NilLiteral):
             if target == 'A':
-                self.emit("\tXRA\tA")
+                self.emit("\tXOR\tA")
             else:
-                self.emit("\tLXI\tH,0")
+                self.emit("\tLD\tHL,0")
 
         elif isinstance(expr, ast.Identifier):
             var = self.variables.get(expr.name)
             if var:
                 mangled = self.mangle_name(expr.name)
                 if var.size == 1:
-                    self.emit(f"\tLDA\t{mangled}")
+                    # Check if A already has this value
+                    if self.a_contains != expr.name:
+                        self.emit(f"\tLD\tA,({mangled})")
+                        self.a_contains = expr.name
                     if target == 'HL':
-                        self.emit("\tMOV\tL,A")
-                        self.emit("\tMVI\tH,0")
+                        self.emit("\tLD\tL,A")
+                        self.emit("\tLD\tH,0")
+                        self.hl_contains = None  # HL modified
                 else:
-                    self.emit(f"\tLHLD\t{mangled}")
+                    # Check if HL already has this value
+                    if self.hl_contains != expr.name:
+                        self.emit(f"\tLD\tHL,({mangled})")
+                        self.hl_contains = expr.name
                     if target == 'A':
-                        self.emit("\tMOV\tA,L")
+                        self.emit("\tLD\tA,L")
+                        self.a_contains = None  # A modified
             else:
                 # Check if it's a constant
                 if expr.name in self.checker.constants:
                     value = self.checker.constants[expr.name]
                     if target == 'A':
-                        self.emit(f"\tMVI\tA,{value & 0xFF}")
+                        self.emit(f"\tLD\tA,{value & 0xFF}")
                     else:
-                        self.emit(f"\tLXI\tH,{value & 0xFFFF}")
+                        self.emit(f"\tLD\tHL,{value & 0xFFFF}")
                 # Could be a subroutine reference
                 elif expr.name in self.checker.subroutines:
-                    self.emit(f"\tLXI\tH,{self.mangle_sub_name(expr.name)}")
+                    self.emit(f"\tLD\tHL,{self.mangle_sub_name(expr.name)}")
                 else:
                     # External symbol
-                    self.emit(f"\tLXI\tH,{expr.name}")
+                    self.emit(f"\tLD\tHL,{expr.name}")
 
         elif isinstance(expr, ast.BinaryOp):
             self.gen_binop(expr, target)
@@ -166,50 +436,50 @@ class CodeGenerator:
             if expr.op == '-':
                 self.gen_expr(expr.operand, target)
                 if target == 'A':
-                    self.emit("\tCMA")
-                    self.emit("\tINR\tA")
+                    self.emit("\tCPL")
+                    self.emit("\tINC\tA")
                 else:
                     # Negate HL: HL = 0 - HL
-                    self.emit("\tMOV\tA,L")
-                    self.emit("\tCMA")
-                    self.emit("\tMOV\tL,A")
-                    self.emit("\tMOV\tA,H")
-                    self.emit("\tCMA")
-                    self.emit("\tMOV\tH,A")
-                    self.emit("\tINX\tH")
+                    self.emit("\tLD\tA,L")
+                    self.emit("\tCPL")
+                    self.emit("\tLD\tL,A")
+                    self.emit("\tLD\tA,H")
+                    self.emit("\tCPL")
+                    self.emit("\tLD\tH,A")
+                    self.emit("\tINC\tHL")
             elif expr.op == '~':
                 self.gen_expr(expr.operand, target)
                 if target == 'A':
-                    self.emit("\tCMA")
+                    self.emit("\tCPL")
                 else:
-                    self.emit("\tMOV\tA,L")
-                    self.emit("\tCMA")
-                    self.emit("\tMOV\tL,A")
-                    self.emit("\tMOV\tA,H")
-                    self.emit("\tCMA")
-                    self.emit("\tMOV\tH,A")
+                    self.emit("\tLD\tA,L")
+                    self.emit("\tCPL")
+                    self.emit("\tLD\tL,A")
+                    self.emit("\tLD\tA,H")
+                    self.emit("\tCPL")
+                    self.emit("\tLD\tH,A")
 
         elif isinstance(expr, ast.Comparison):
             self.gen_comparison(expr)
             if target == 'HL':
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMVI\tH,0")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tH,0")
 
         elif isinstance(expr, ast.LogicalOp):
             self.gen_logical(expr)
             if target == 'HL':
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMVI\tH,0")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tH,0")
 
         elif isinstance(expr, ast.NotOp):
             self.gen_expr(expr.operand, 'A')
-            self.emit("\tORA\tA")  # Set flags
-            self.emit("\tMVI\tA,0")
-            self.emit("\tJNZ\t$+4")
-            self.emit("\tMVI\tA,1")
+            self.emit("\tOR\tA")  # Set flags
+            self.emit("\tLD\tA,0")
+            self.emit("\tJP\tNZ,$+4")
+            self.emit("\tLD\tA,1")
             if target == 'HL':
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMVI\tH,0")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tH,0")
 
         elif isinstance(expr, ast.Cast):
             # Generate the inner expression
@@ -227,22 +497,22 @@ class CodeGenerator:
             # Load from address in HL
             typ = expr.resolved_type
             if self.type_size(typ) == 1:
-                self.emit("\tMOV\tA,M")
+                self.emit("\tLD\tA,(HL)")
                 if target == 'HL':
-                    self.emit("\tMOV\tL,A")
-                    self.emit("\tMVI\tH,0")
+                    self.emit("\tLD\tL,A")
+                    self.emit("\tLD\tH,0")
             else:
-                self.emit("\tMOV\tE,M")
-                self.emit("\tINX\tH")
-                self.emit("\tMOV\tD,M")
-                self.emit("\tXCHG")
+                self.emit("\tLD\tE,(HL)")
+                self.emit("\tINC\tHL")
+                self.emit("\tLD\tD,(HL)")
+                self.emit("\tEX\tDE,HL")
 
         elif isinstance(expr, ast.AddressOf):
             # Get address of operand
             if isinstance(expr.operand, ast.Identifier):
                 var = self.variables.get(expr.operand.name)
                 if var:
-                    self.emit(f"\tLXI\tH,{self.mangle_name(expr.operand.name)}")
+                    self.emit(f"\tLD\tHL,{self.mangle_name(expr.operand.name)}")
             elif isinstance(expr.operand, ast.FieldAccess):
                 self.gen_field_address(expr.operand)
             elif isinstance(expr.operand, ast.ArrayAccess):
@@ -257,9 +527,9 @@ class CodeGenerator:
                 typ = expr.target.resolved_type
                 if isinstance(typ, ArrayType):
                     if target == 'A':
-                        self.emit(f"\tMVI\tA,{typ.size & 0xFF}")
+                        self.emit(f"\tLD\tA,{typ.size & 0xFF}")
                     else:
-                        self.emit(f"\tLXI\tH,{typ.size}")
+                        self.emit(f"\tLD\tHL,{typ.size}")
 
         elif isinstance(expr, ast.BytesOf):
             # Return size in bytes
@@ -269,9 +539,9 @@ class CodeGenerator:
             else:
                 size = self.type_size(self.checker.resolve_type(expr.target))
             if target == 'A':
-                self.emit(f"\tMVI\tA,{size & 0xFF}")
+                self.emit(f"\tLD\tA,{size & 0xFF}")
             else:
-                self.emit(f"\tLXI\tH,{size}")
+                self.emit(f"\tLD\tHL,{size}")
 
         elif isinstance(expr, ast.Next):
             self.gen_expr(expr.pointer, 'HL')
@@ -279,10 +549,10 @@ class CodeGenerator:
             if isinstance(typ, PtrType):
                 size = self.type_size(typ.target)
                 if size == 1:
-                    self.emit("\tINX\tH")
+                    self.emit("\tINC\tHL")
                 else:
-                    self.emit(f"\tLXI\tD,{size}")
-                    self.emit("\tDAD\tD")
+                    self.emit(f"\tLD\tDE,{size}")
+                    self.emit("\tADD\tHL,DE")
 
         elif isinstance(expr, ast.Prev):
             self.gen_expr(expr.pointer, 'HL')
@@ -290,11 +560,11 @@ class CodeGenerator:
             if isinstance(typ, PtrType):
                 size = self.type_size(typ.target)
                 if size == 1:
-                    self.emit("\tDCX\tH")
+                    self.emit("\tDEC\tHL")
                 else:
                     # HL = HL - size
-                    self.emit(f"\tLXI\tD,-{size}")
-                    self.emit("\tDAD\tD")
+                    self.emit(f"\tLD\tDE,-{size}")
+                    self.emit("\tADD\tHL,DE")
 
         elif isinstance(expr, ast.ArrayInitializer):
             # This should only appear in variable initialization
@@ -310,21 +580,21 @@ class CodeGenerator:
         # For 8-bit operations
         if self.type_size(expr.resolved_type) == 1:
             self.gen_expr(expr.left, 'A')
-            self.emit("\tPUSH\tPSW")
+            self.emit("\tPUSH\tAF")
             self.gen_expr(expr.right, 'A')
-            self.emit("\tMOV\tB,A")
-            self.emit("\tPOP\tPSW")
+            self.emit("\tLD\tB,A")
+            self.emit("\tPOP\tAF")
 
             if op == '+':
-                self.emit("\tADD\tB")
+                self.emit("\tADD\tA,B")
             elif op == '-':
                 self.emit("\tSUB\tB")
             elif op == '&':
-                self.emit("\tANA\tB")
+                self.emit("\tAND\tB")
             elif op == '|':
-                self.emit("\tORA\tB")
+                self.emit("\tOR\tB")
             elif op == '^':
-                self.emit("\tXRA\tB")
+                self.emit("\tXOR\tB")
             elif op == '*':
                 self.emit("\tCALL\t_mul8")
             elif op == '/':
@@ -336,74 +606,74 @@ class CodeGenerator:
                 label = self.new_label("SHL")
                 end = self.new_label("SHLE")
                 self.emit_label(label)
-                self.emit("\tMOV\tC,A")
-                self.emit("\tMOV\tA,B")
-                self.emit("\tORA\tA")
-                self.emit(f"\tJZ\t{end}")
-                self.emit("\tDCR\tB")
-                self.emit("\tMOV\tA,C")
-                self.emit("\tADD\tA")
-                self.emit(f"\tJMP\t{label}")
+                self.emit("\tLD\tC,A")
+                self.emit("\tLD\tA,B")
+                self.emit("\tOR\tA")
+                self.emit(f"\tJP\tZ,{end}")
+                self.emit("\tDEC\tB")
+                self.emit("\tLD\tA,C")
+                self.emit("\tADD\tA,A")
+                self.emit(f"\tJP\t{label}")
                 self.emit_label(end)
             elif op == '>>':
                 # Shift right by B
                 label = self.new_label("SHR")
                 end = self.new_label("SHRE")
                 self.emit_label(label)
-                self.emit("\tMOV\tC,A")
-                self.emit("\tMOV\tA,B")
-                self.emit("\tORA\tA")
-                self.emit(f"\tJZ\t{end}")
-                self.emit("\tDCR\tB")
-                self.emit("\tMOV\tA,C")
-                self.emit("\tORA\tA")
-                self.emit("\tRAR")
-                self.emit(f"\tJMP\t{label}")
+                self.emit("\tLD\tC,A")
+                self.emit("\tLD\tA,B")
+                self.emit("\tOR\tA")
+                self.emit(f"\tJP\tZ,{end}")
+                self.emit("\tDEC\tB")
+                self.emit("\tLD\tA,C")
+                self.emit("\tOR\tA")
+                self.emit("\tRRA")
+                self.emit(f"\tJP\t{label}")
                 self.emit_label(end)
 
             if target == 'HL':
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMVI\tH,0")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tH,0")
 
         else:
             # 16-bit operations
             self.gen_expr(expr.left, 'HL')
-            self.emit("\tPUSH\tH")
+            self.emit("\tPUSH\tHL")
             self.gen_expr(expr.right, 'HL')
-            self.emit("\tXCHG")  # DE = right
-            self.emit("\tPOP\tH")  # HL = left
+            self.emit("\tEX\tDE,HL")  # DE = right
+            self.emit("\tPOP\tHL")  # HL = left
 
             if op == '+':
-                self.emit("\tDAD\tD")
+                self.emit("\tADD\tHL,DE")
             elif op == '-':
                 # HL = HL - DE
-                self.emit("\tMOV\tA,L")
+                self.emit("\tLD\tA,L")
                 self.emit("\tSUB\tE")
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMOV\tA,H")
-                self.emit("\tSBB\tD")
-                self.emit("\tMOV\tH,A")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tA,H")
+                self.emit("\tSBC\tA,D")
+                self.emit("\tLD\tH,A")
             elif op == '&':
-                self.emit("\tMOV\tA,L")
-                self.emit("\tANA\tE")
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMOV\tA,H")
-                self.emit("\tANA\tD")
-                self.emit("\tMOV\tH,A")
+                self.emit("\tLD\tA,L")
+                self.emit("\tAND\tE")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tA,H")
+                self.emit("\tAND\tD")
+                self.emit("\tLD\tH,A")
             elif op == '|':
-                self.emit("\tMOV\tA,L")
-                self.emit("\tORA\tE")
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMOV\tA,H")
-                self.emit("\tORA\tD")
-                self.emit("\tMOV\tH,A")
+                self.emit("\tLD\tA,L")
+                self.emit("\tOR\tE")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tA,H")
+                self.emit("\tOR\tD")
+                self.emit("\tLD\tH,A")
             elif op == '^':
-                self.emit("\tMOV\tA,L")
-                self.emit("\tXRA\tE")
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMOV\tA,H")
-                self.emit("\tXRA\tD")
-                self.emit("\tMOV\tH,A")
+                self.emit("\tLD\tA,L")
+                self.emit("\tXOR\tE")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tA,H")
+                self.emit("\tXOR\tD")
+                self.emit("\tLD\tH,A")
             elif op == '*':
                 self.emit("\tCALL\t_mul16")
             elif op == '/':
@@ -416,7 +686,7 @@ class CodeGenerator:
                 self.emit("\tCALL\t_shr16")
 
             if target == 'A':
-                self.emit("\tMOV\tA,L")
+                self.emit("\tLD\tA,L")
 
     def gen_comparison(self, expr: ast.Comparison) -> None:
         """Generate comparison, result in A (0 or 1)."""
@@ -429,35 +699,42 @@ class CodeGenerator:
         # Optimize: x == 0 or x != 0
         if is_zero_right and op in ('==', '!='):
             self.gen_expr(expr.left, 'HL')
-            self.emit("\tMOV\tA,H")
-            self.emit("\tORA\tL")
+            self.emit("\tLD\tA,H")
+            self.emit("\tOR\tL")
             if op == '==':
                 # Result is 1 if zero, 0 if nonzero
                 end = self.new_label("END")
-                self.emit(f"\tJNZ\t{end}")
-                self.emit("\tMVI\tA,1")
+                self.emit(f"\tJP\tNZ,{end}")
+                self.emit("\tLD\tA,1")
                 self.emit_label(end)
             else:  # !=
                 # Result is 0 if zero, 1 if nonzero
                 end = self.new_label("END")
-                self.emit(f"\tJZ\t{end}")
-                self.emit("\tMVI\tA,1")
+                self.emit(f"\tJP\tZ,{end}")
+                self.emit("\tLD\tA,1")
                 self.emit_label(end)
             return
 
-        # Generate both sides
-        self.gen_expr(expr.left, 'HL')
-        self.emit("\tPUSH\tH")
-        self.gen_expr(expr.right, 'HL')
-        self.emit("\tXCHG")
-        self.emit("\tPOP\tH")
+        # Optimized comparison when right side is a constant
+        right_const = self.eval_const_expr(expr.right)
+        if right_const is not None:
+            # Generate: left in HL, const in DE directly (no push/pop)
+            self.gen_expr(expr.left, 'HL')
+            self.emit(f"\tLD\tDE,{right_const}")
+        else:
+            # General comparison with push/pop
+            self.gen_expr(expr.left, 'HL')
+            self.emit("\tPUSH\tHL")
+            self.gen_expr(expr.right, 'HL')
+            self.emit("\tEX\tDE,HL")
+            self.emit("\tPOP\tHL")
 
         # Compare HL with DE
-        self.emit("\tMOV\tA,H")
-        self.emit("\tCMP\tD")
-        self.emit("\tJNZ\t$+6")
-        self.emit("\tMOV\tA,L")
-        self.emit("\tCMP\tE")
+        self.emit("\tLD\tA,H")
+        self.emit("\tCP\tD")
+        self.emit("\tJP\tNZ,$+6")
+        self.emit("\tLD\tA,L")
+        self.emit("\tCP\tE")
 
         # Set result based on flags
         true_label = self.new_label("TRUE")
@@ -466,25 +743,25 @@ class CodeGenerator:
         false_label = self.new_label("FALSE")
 
         if op == '==':
-            self.emit(f"\tJZ\t{true_label}")
+            self.emit(f"\tJP\tZ,{true_label}")
         elif op == '!=':
-            self.emit(f"\tJNZ\t{true_label}")
+            self.emit(f"\tJP\tNZ,{true_label}")
         elif op == '<':
-            self.emit(f"\tJC\t{true_label}")
+            self.emit(f"\tJP\tC,{true_label}")
         elif op == '>=':
-            self.emit(f"\tJNC\t{true_label}")
+            self.emit(f"\tJP\tNC,{true_label}")
         elif op == '>':
-            self.emit(f"\tJZ\t{false_label}")  # Equal means not greater
-            self.emit(f"\tJNC\t{true_label}")
+            self.emit(f"\tJP\tZ,{false_label}")  # Equal means not greater
+            self.emit(f"\tJP\tNC,{true_label}")
         elif op == '<=':
-            self.emit(f"\tJZ\t{true_label}")  # Equal means <=
-            self.emit(f"\tJC\t{true_label}")
+            self.emit(f"\tJP\tZ,{true_label}")  # Equal means <=
+            self.emit(f"\tJP\tC,{true_label}")
 
         self.emit_label(false_label)
-        self.emit("\tXRA\tA")  # False
-        self.emit(f"\tJMP\t{end_label}")
+        self.emit("\tXOR\tA")  # False
+        self.emit(f"\tJP\t{end_label}")
         self.emit_label(true_label)
-        self.emit("\tMVI\tA,1")  # True
+        self.emit("\tLD\tA,1")  # True
         self.emit_label(end_label)
 
     def gen_logical(self, expr: ast.LogicalOp) -> None:
@@ -494,17 +771,17 @@ class CodeGenerator:
             end_label = self.new_label("END")
 
             self.gen_expr(expr.left, 'A')
-            self.emit("\tORA\tA")
-            self.emit(f"\tJZ\t{false_label}")
+            self.emit("\tOR\tA")
+            self.emit(f"\tJP\tZ,{false_label}")
 
             self.gen_expr(expr.right, 'A')
-            self.emit("\tORA\tA")
-            self.emit(f"\tJZ\t{false_label}")
+            self.emit("\tOR\tA")
+            self.emit(f"\tJP\tZ,{false_label}")
 
-            self.emit("\tMVI\tA,1")
-            self.emit(f"\tJMP\t{end_label}")
+            self.emit("\tLD\tA,1")
+            self.emit(f"\tJP\t{end_label}")
             self.emit_label(false_label)
-            self.emit("\tXRA\tA")
+            self.emit("\tXOR\tA")
             self.emit_label(end_label)
 
         elif expr.op == 'or':
@@ -512,17 +789,17 @@ class CodeGenerator:
             end_label = self.new_label("END")
 
             self.gen_expr(expr.left, 'A')
-            self.emit("\tORA\tA")
-            self.emit(f"\tJNZ\t{true_label}")
+            self.emit("\tOR\tA")
+            self.emit(f"\tJP\tNZ,{true_label}")
 
             self.gen_expr(expr.right, 'A')
-            self.emit("\tORA\tA")
-            self.emit(f"\tJNZ\t{true_label}")
+            self.emit("\tOR\tA")
+            self.emit(f"\tJP\tNZ,{true_label}")
 
-            self.emit("\tXRA\tA")
-            self.emit(f"\tJMP\t{end_label}")
+            self.emit("\tXOR\tA")
+            self.emit(f"\tJP\t{end_label}")
             self.emit_label(true_label)
-            self.emit("\tMVI\tA,1")
+            self.emit("\tLD\tA,1")
             self.emit_label(end_label)
 
     def gen_array_access(self, expr: ast.ArrayAccess, target: str) -> None:
@@ -533,17 +810,17 @@ class CodeGenerator:
         # Load value from address
         typ = expr.resolved_type
         if self.type_size(typ) == 1:
-            self.emit("\tMOV\tA,M")
+            self.emit("\tLD\tA,(HL)")
             if target == 'HL':
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMVI\tH,0")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tH,0")
         else:
-            self.emit("\tMOV\tE,M")
-            self.emit("\tINX\tH")
-            self.emit("\tMOV\tD,M")
-            self.emit("\tXCHG")
+            self.emit("\tLD\tE,(HL)")
+            self.emit("\tINC\tHL")
+            self.emit("\tLD\tD,(HL)")
+            self.emit("\tEX\tDE,HL")
             if target == 'A':
-                self.emit("\tMOV\tA,L")
+                self.emit("\tLD\tA,L")
 
     def gen_array_address(self, expr: ast.ArrayAccess) -> None:
         """Generate address of array element in HL."""
@@ -560,23 +837,23 @@ class CodeGenerator:
 
         if elem_size > 1:
             # Multiply index by element size
-            self.emit(f"\tLXI\tD,{elem_size}")
+            self.emit(f"\tLD\tDE,{elem_size}")
             self.emit("\tCALL\t_mul16")
 
-        self.emit("\tPUSH\tH")
+        self.emit("\tPUSH\tHL")
 
         # Get base address
         if isinstance(expr.array, ast.Identifier):
             var = self.variables.get(expr.array.name)
             if var:
-                self.emit(f"\tLXI\tH,{self.mangle_name(expr.array.name)}")
+                self.emit(f"\tLD\tHL,{self.mangle_name(expr.array.name)}")
             else:
-                self.emit(f"\tLXI\tH,{expr.array.name}")
+                self.emit(f"\tLD\tHL,{expr.array.name}")
         else:
             self.gen_expr(expr.array, 'HL')
 
-        self.emit("\tPOP\tD")
-        self.emit("\tDAD\tD")
+        self.emit("\tPOP\tDE")
+        self.emit("\tADD\tHL,DE")
 
     def gen_field_access(self, expr: ast.FieldAccess, target: str) -> None:
         """Generate field access."""
@@ -585,17 +862,17 @@ class CodeGenerator:
         # Load value
         typ = expr.resolved_type
         if self.type_size(typ) == 1:
-            self.emit("\tMOV\tA,M")
+            self.emit("\tLD\tA,(HL)")
             if target == 'HL':
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMVI\tH,0")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tH,0")
         else:
-            self.emit("\tMOV\tE,M")
-            self.emit("\tINX\tH")
-            self.emit("\tMOV\tD,M")
-            self.emit("\tXCHG")
+            self.emit("\tLD\tE,(HL)")
+            self.emit("\tINC\tHL")
+            self.emit("\tLD\tD,(HL)")
+            self.emit("\tEX\tDE,HL")
             if target == 'A':
-                self.emit("\tMOV\tA,L")
+                self.emit("\tLD\tA,L")
 
     def gen_field_address(self, expr: ast.FieldAccess) -> None:
         """Generate address of record field in HL."""
@@ -608,9 +885,9 @@ class CodeGenerator:
             if isinstance(expr.record, ast.Identifier):
                 var = self.variables.get(expr.record.name)
                 if var:
-                    self.emit(f"\tLXI\tH,{self.mangle_name(expr.record.name)}")
+                    self.emit(f"\tLD\tHL,{self.mangle_name(expr.record.name)}")
                 else:
-                    self.emit(f"\tLXI\tH,{expr.record.name}")
+                    self.emit(f"\tLD\tHL,{expr.record.name}")
             else:
                 self.gen_expr(expr.record, 'HL')
 
@@ -621,16 +898,31 @@ class CodeGenerator:
                 for field in info.fields:
                     if field.name == expr.field:
                         if field.offset > 0:
-                            self.emit(f"\tLXI\tD,{field.offset}")
-                            self.emit("\tDAD\tD")
+                            self.emit(f"\tLD\tDE,{field.offset}")
+                            self.emit("\tADD\tHL,DE")
                         break
 
     def gen_call(self, expr: ast.Call, target: str) -> None:
         """Generate subroutine call."""
+        # Check if this call should be inlined
+        if isinstance(expr.target, ast.Identifier):
+            name = expr.target.name
+            if name in self.inlined_subs and not self.generating_inline:
+                # Inline the subroutine body directly
+                candidate = self.inline_candidates.get(name)
+                if candidate and candidate.decl.body:
+                    self.emit(f"\t; Inlined: {name}")
+                    self.generating_inline = True
+                    for stmt in candidate.decl.body:
+                        if not isinstance(stmt, ast.ReturnStmt):
+                            self.gen_stmt(stmt)
+                    self.generating_inline = False
+                    return
+
         # Push arguments in reverse order
         for arg in reversed(expr.args):
             self.gen_expr(arg, 'HL')
-            self.emit("\tPUSH\tH")
+            self.emit("\tPUSH\tHL")
 
         # Call
         if isinstance(expr.target, ast.Identifier):
@@ -644,9 +936,9 @@ class CodeGenerator:
                 # Load address and use _callhl helper
                 var = self.variables.get(name)
                 if var:
-                    self.emit(f"\tLHLD\t{self.mangle_name(name)}")
+                    self.emit(f"\tLD\tHL,({self.mangle_name(name)})")
                 else:
-                    self.emit(f"\tLXI\tH,{name}")
+                    self.emit(f"\tLD\tHL,{name}")
                 self.emit("\tCALL\t_callhl")  # Helper that does PCHL
         else:
             self.gen_expr(expr.target, 'HL')
@@ -657,22 +949,22 @@ class CodeGenerator:
         if expr.args:
             stack_bytes = len(expr.args) * 2
             if stack_bytes == 2:
-                self.emit("\tPOP\tD")  # Discard
+                self.emit("\tPOP\tDE")  # Discard
             elif stack_bytes == 4:
-                self.emit("\tPOP\tD")
-                self.emit("\tPOP\tD")
+                self.emit("\tPOP\tDE")
+                self.emit("\tPOP\tDE")
             else:
                 # Save return value, adjust SP, restore return value
-                self.emit("\tPUSH\tH")  # Save return value
-                self.emit(f"\tLXI\tH,{stack_bytes + 2}")  # +2 for saved value
-                self.emit("\tDAD\tSP")
-                self.emit("\tSPHL")
-                self.emit("\tPOP\tH")  # Restore return value
+                self.emit("\tPUSH\tHL")  # Save return value
+                self.emit(f"\tLD\tHL,{stack_bytes + 2}")  # +2 for saved value
+                self.emit("\tADD\tHL,SP")
+                self.emit("\tLD\tSP,HL")
+                self.emit("\tPOP\tHL")  # Restore return value
 
         # Result is in HL for 16-bit, A for 8-bit
         if target == 'A' and expr.resolved_type:
             if self.type_size(expr.resolved_type) > 1:
-                self.emit("\tMOV\tA,L")
+                self.emit("\tLD\tA,L")
 
     # Code generation for statements
 
@@ -703,11 +995,11 @@ class CodeGenerator:
 
         elif isinstance(stmt, ast.BreakStmt):
             if self.break_labels:
-                self.emit(f"\tJMP\t{self.break_labels[-1]}")
+                self.emit(f"\tJP\t{self.break_labels[-1]}")
 
         elif isinstance(stmt, ast.ContinueStmt):
             if self.continue_labels:
-                self.emit(f"\tJMP\t{self.continue_labels[-1]}")
+                self.emit(f"\tJP\t{self.continue_labels[-1]}")
 
         elif isinstance(stmt, ast.ReturnStmt):
             self.emit("\tRET")
@@ -752,26 +1044,45 @@ class CodeGenerator:
 
         # Check if already allocated (for global vars)
         var = self.variables.get(stmt.name)
+        is_preallocated = var is not None
         if not var:
             var = self.allocate_var(stmt.name, var_type)
 
-            # Generate initialization if present
-            if stmt.init:
-                mangled = self.mangle_name(stmt.name)
-                if isinstance(stmt.init, ast.ArrayInitializer):
-                    self.gen_array_init(var, stmt.init)
-                elif isinstance(stmt.init, ast.StringLiteral):
-                    # String initialization
-                    label = self.get_string_label(stmt.init.value)
-                    self.emit(f"\tLXI\tH,{label}")
-                    self.emit(f"\tSHLD\t{mangled}")
-                else:
-                    self.gen_expr(stmt.init, 'HL')
-                    if var.size == 1:
-                        self.emit("\tMOV\tA,L")
-                        self.emit(f"\tSTA\t{mangled}")
+        # Generate initialization if present (even for pre-allocated globals)
+        if stmt.init:
+            mangled = self.mangle_name(stmt.name)
+            if isinstance(stmt.init, ast.ArrayInitializer):
+                # Try to evaluate as constant array for data segment init
+                elem_size = 1
+                if isinstance(var.type, ArrayType):
+                    elem_size = self.type_size(var.type.element)
+                const_values = []
+                all_const = True
+                for elem in stmt.init.elements:
+                    val = self.eval_const_expr(elem)
+                    if val is not None:
+                        const_values.append(val)
                     else:
-                        self.emit(f"\tSHLD\t{mangled}")
+                        all_const = False
+                        break
+                if all_const and const_values:
+                    # Store for data segment initialization
+                    self.array_initializers[stmt.name] = (const_values, elem_size)
+                elif not is_preallocated:
+                    # Non-constant array init for local arrays only
+                    self.gen_array_init(var, stmt.init)
+            elif isinstance(stmt.init, ast.StringLiteral):
+                # String initialization
+                label = self.get_string_label(stmt.init.value)
+                self.emit(f"\tLD\tHL,{label}")
+                self.emit(f"\tLD\t({mangled}),HL")
+            else:
+                self.gen_expr(stmt.init, 'HL')
+                if var.size == 1:
+                    self.emit("\tLD\tA,L")
+                    self.emit(f"\tLD\t({mangled}),A")
+                else:
+                    self.emit(f"\tLD\t({mangled}),HL")
 
     def gen_array_init(self, var: Variable, init: ast.ArrayInitializer) -> None:
         """Generate array initialization."""
@@ -784,14 +1095,51 @@ class CodeGenerator:
         for elem in init.elements:
             self.gen_expr(elem, 'HL')
             if elem_size == 1:
-                self.emit("\tMOV\tA,L")
-                self.emit(f"\tSTA\t{mangled}+{offset}")
+                self.emit("\tLD\tA,L")
+                self.emit(f"\tLD\t({mangled}+{offset}),A")
             else:
-                self.emit(f"\tSHLD\t{mangled}+{offset}")
+                self.emit(f"\tLD\t({mangled}+{offset}),HL")
             offset += elem_size
 
     def gen_assignment(self, stmt: ast.Assignment) -> None:
         """Generate assignment statement."""
+        # Optimize byte variable increment/decrement: var := var + 1 -> INR M
+        if isinstance(stmt.target, ast.Identifier):
+            var = self.variables.get(stmt.target.name)
+            if var and var.size == 1:
+                # Check for var := var + 1 or var := var - 1
+                if isinstance(stmt.value, ast.BinaryOp):
+                    if stmt.value.op == '+' and isinstance(stmt.value.left, ast.Identifier):
+                        if stmt.value.left.name == stmt.target.name:
+                            inc = self.eval_const_expr(stmt.value.right)
+                            if inc == 1:
+                                mangled = self.mangle_name(stmt.target.name)
+                                self.emit(f"\tLD\tHL,{mangled}")
+                                self.emit("\tINC\t(HL)")
+                                self.invalidate_regs()  # INR M modifies memory
+                                return
+                            elif inc == -1:
+                                mangled = self.mangle_name(stmt.target.name)
+                                self.emit(f"\tLD\tHL,{mangled}")
+                                self.emit("\tDEC\t(HL)")
+                                self.invalidate_regs()
+                                return
+                    elif stmt.value.op == '-' and isinstance(stmt.value.left, ast.Identifier):
+                        if stmt.value.left.name == stmt.target.name:
+                            dec = self.eval_const_expr(stmt.value.right)
+                            if dec == 1:
+                                mangled = self.mangle_name(stmt.target.name)
+                                self.emit(f"\tLD\tHL,{mangled}")
+                                self.emit("\tDEC\t(HL)")
+                                self.invalidate_regs()
+                                return
+                            elif dec == -1:
+                                mangled = self.mangle_name(stmt.target.name)
+                                self.emit(f"\tLD\tHL,{mangled}")
+                                self.emit("\tINC\t(HL)")
+                                self.invalidate_regs()
+                                return
+
         # Generate value
         self.gen_expr(stmt.value, 'HL')
 
@@ -801,58 +1149,60 @@ class CodeGenerator:
             if var:
                 mangled = self.mangle_name(stmt.target.name)
                 if var.size == 1:
-                    self.emit("\tMOV\tA,L")
-                    self.emit(f"\tSTA\t{mangled}")
+                    self.emit("\tLD\tA,L")
+                    self.emit(f"\tLD\t({mangled}),A")
+                    self.a_contains = stmt.target.name  # A now has this var
                 else:
-                    self.emit(f"\tSHLD\t{mangled}")
+                    self.emit(f"\tLD\t({mangled}),HL")
+                    self.hl_contains = stmt.target.name  # HL still has this var
 
         elif isinstance(stmt.target, ast.ArrayAccess):
-            self.emit("\tPUSH\tH")  # Save value
+            self.emit("\tPUSH\tHL")  # Save value
             self.gen_array_address(stmt.target)
-            self.emit("\tXCHG")  # DE = address
-            self.emit("\tPOP\tH")  # HL = value
+            self.emit("\tEX\tDE,HL")  # DE = address
+            self.emit("\tPOP\tHL")  # HL = value
 
             typ = stmt.target.resolved_type
             if self.type_size(typ) == 1:
-                self.emit("\tMOV\tA,L")
-                self.emit("\tSTAX\tD")
+                self.emit("\tLD\tA,L")
+                self.emit("\tLD\t(DE),A")
             else:
-                self.emit("\tXCHG")
-                self.emit("\tMOV\tM,E")
-                self.emit("\tINX\tH")
-                self.emit("\tMOV\tM,D")
+                self.emit("\tEX\tDE,HL")
+                self.emit("\tLD\t(HL),E")
+                self.emit("\tINC\tHL")
+                self.emit("\tLD\t(HL),D")
 
         elif isinstance(stmt.target, ast.FieldAccess):
-            self.emit("\tPUSH\tH")
+            self.emit("\tPUSH\tHL")
             self.gen_field_address(stmt.target)
-            self.emit("\tXCHG")
-            self.emit("\tPOP\tH")
+            self.emit("\tEX\tDE,HL")
+            self.emit("\tPOP\tHL")
 
             typ = stmt.target.resolved_type
             if self.type_size(typ) == 1:
-                self.emit("\tMOV\tA,L")
-                self.emit("\tSTAX\tD")
+                self.emit("\tLD\tA,L")
+                self.emit("\tLD\t(DE),A")
             else:
-                self.emit("\tXCHG")
-                self.emit("\tMOV\tM,E")
-                self.emit("\tINX\tH")
-                self.emit("\tMOV\tM,D")
+                self.emit("\tEX\tDE,HL")
+                self.emit("\tLD\t(HL),E")
+                self.emit("\tINC\tHL")
+                self.emit("\tLD\t(HL),D")
 
         elif isinstance(stmt.target, ast.Dereference):
-            self.emit("\tPUSH\tH")
+            self.emit("\tPUSH\tHL")
             self.gen_expr(stmt.target.pointer, 'HL')
-            self.emit("\tXCHG")
-            self.emit("\tPOP\tH")
+            self.emit("\tEX\tDE,HL")
+            self.emit("\tPOP\tHL")
 
             typ = stmt.target.resolved_type
             if self.type_size(typ) == 1:
-                self.emit("\tMOV\tA,L")
-                self.emit("\tSTAX\tD")
+                self.emit("\tLD\tA,L")
+                self.emit("\tLD\t(DE),A")
             else:
-                self.emit("\tXCHG")
-                self.emit("\tMOV\tM,E")
-                self.emit("\tINX\tH")
-                self.emit("\tMOV\tM,D")
+                self.emit("\tEX\tDE,HL")
+                self.emit("\tLD\t(HL),E")
+                self.emit("\tINC\tHL")
+                self.emit("\tLD\t(HL),D")
 
     def gen_multi_assignment(self, stmt: ast.MultiAssignment) -> None:
         """Generate multi-value assignment from call."""
@@ -866,16 +1216,16 @@ class CodeGenerator:
                 # First return value in HL
                 pass
             else:
-                self.emit("\tPOP\tH")
+                self.emit("\tPOP\tHL")
 
             if isinstance(target, ast.Identifier):
                 var = self.variables.get(target.name)
                 mangled = self.mangle_name(target.name)
                 if var and var.size == 1:
-                    self.emit("\tMOV\tA,L")
-                    self.emit(f"\tSTA\t{mangled}")
+                    self.emit("\tLD\tA,L")
+                    self.emit(f"\tLD\t({mangled}),A")
                 else:
-                    self.emit(f"\tSHLD\t{mangled}")
+                    self.emit(f"\tLD\t({mangled}),HL")
 
     def gen_condition_branch_true(self, cond: ast.Expression, true_label: str) -> None:
         """Generate condition and branch to true_label if true."""
@@ -885,41 +1235,51 @@ class CodeGenerator:
             is_zero_right = isinstance(cond.right, ast.NumberLiteral) and cond.right.value == 0
             if is_zero_right and op in ('==', '!='):
                 self.gen_expr(cond.left, 'HL')
-                self.emit("\tMOV\tA,H")
-                self.emit("\tORA\tL")
+                self.emit("\tLD\tA,H")
+                self.emit("\tOR\tL")
                 if op == '==':
-                    self.emit(f"\tJZ\t{true_label}")
+                    self.emit(f"\tJP\tZ,{true_label}")
                 else:
-                    self.emit(f"\tJNZ\t{true_label}")
+                    self.emit(f"\tJP\tNZ,{true_label}")
                 return
 
-            self.gen_expr(cond.left, 'HL')
-            self.emit("\tPUSH\tH")
-            self.gen_expr(cond.right, 'HL')
-            self.emit("\tXCHG")
-            self.emit("\tPOP\tH")
-            self.emit("\tMOV\tA,H")
-            self.emit("\tCMP\tD")
-            self.emit("\tJNZ\t$+6")
-            self.emit("\tMOV\tA,L")
-            self.emit("\tCMP\tE")
+            # Optimized comparison when right side is a constant
+            right_const = self.eval_const_expr(cond.right)
+            if right_const is not None:
+                # Generate: left in HL, const in DE directly (no push/pop)
+                self.gen_expr(cond.left, 'HL')
+                self.emit(f"\tLD\tDE,{right_const}")
+            else:
+                # General comparison with push/pop
+                self.gen_expr(cond.left, 'HL')
+                self.emit("\tPUSH\tHL")
+                self.gen_expr(cond.right, 'HL')
+                self.emit("\tEX\tDE,HL")
+                self.emit("\tPOP\tHL")
+
+            # Compare HL with DE
+            self.emit("\tLD\tA,H")
+            self.emit("\tCP\tD")
+            self.emit("\tJP\tNZ,$+6")
+            self.emit("\tLD\tA,L")
+            self.emit("\tCP\tE")
             # Branch if true (opposite of gen_condition_branch)
             if op == '==':
-                self.emit(f"\tJZ\t{true_label}")
+                self.emit(f"\tJP\tZ,{true_label}")
             elif op == '!=':
-                self.emit(f"\tJNZ\t{true_label}")
+                self.emit(f"\tJP\tNZ,{true_label}")
             elif op == '<':
-                self.emit(f"\tJC\t{true_label}")
+                self.emit(f"\tJP\tC,{true_label}")
             elif op == '>=':
-                self.emit(f"\tJNC\t{true_label}")
+                self.emit(f"\tJP\tNC,{true_label}")
             elif op == '>':
                 skip_lbl = self.new_label("SKIP")
-                self.emit(f"\tJZ\t{skip_lbl}")
-                self.emit(f"\tJNC\t{true_label}")
+                self.emit(f"\tJP\tZ,{skip_lbl}")
+                self.emit(f"\tJP\tNC,{true_label}")
                 self.emit_label(skip_lbl)
             elif op == '<=':
-                self.emit(f"\tJZ\t{true_label}")
-                self.emit(f"\tJC\t{true_label}")
+                self.emit(f"\tJP\tZ,{true_label}")
+                self.emit(f"\tJP\tC,{true_label}")
             return
 
         if isinstance(cond, ast.NotOp):
@@ -929,8 +1289,8 @@ class CodeGenerator:
 
         # Default: evaluate and test
         self.gen_expr(cond, 'A')
-        self.emit("\tORA\tA")
-        self.emit(f"\tJNZ\t{true_label}")
+        self.emit("\tOR\tA")
+        self.emit(f"\tJP\tNZ,{true_label}")
 
     def gen_condition_branch(self, cond: ast.Expression, false_label: str) -> None:
         """Generate condition and branch to false_label if false."""
@@ -941,41 +1301,81 @@ class CodeGenerator:
             is_zero_right = isinstance(cond.right, ast.NumberLiteral) and cond.right.value == 0
             if is_zero_right and op in ('==', '!='):
                 self.gen_expr(cond.left, 'HL')
-                self.emit("\tMOV\tA,H")
-                self.emit("\tORA\tL")
+                self.emit("\tLD\tA,H")
+                self.emit("\tOR\tL")
                 if op == '==':
-                    self.emit(f"\tJNZ\t{false_label}")
+                    self.emit(f"\tJP\tNZ,{false_label}")
                 else:
-                    self.emit(f"\tJZ\t{false_label}")
+                    self.emit(f"\tJP\tZ,{false_label}")
                 return
 
-            # General comparison
-            self.gen_expr(cond.left, 'HL')
-            self.emit("\tPUSH\tH")
-            self.gen_expr(cond.right, 'HL')
-            self.emit("\tXCHG")
-            self.emit("\tPOP\tH")
-            self.emit("\tMOV\tA,H")
-            self.emit("\tCMP\tD")
-            self.emit("\tJNZ\t$+6")
-            self.emit("\tMOV\tA,L")
-            self.emit("\tCMP\tE")
+            # Check if we can use byte comparison (CPI)
+            # This works when left is a byte type and right is a constant 0-255
+            right_const = self.eval_const_expr(cond.right)
+            left_type = cond.left.resolved_type
+            is_byte_cmp = (right_const is not None and
+                          0 <= right_const <= 255 and
+                          left_type is not None and
+                          self.type_size(left_type) == 1)
+
+            if is_byte_cmp:
+                # Optimized byte comparison using CPI
+                self.gen_expr(cond.left, 'A')
+                self.emit(f"\tCP\t{right_const}")
+                # Branch based on comparison
+                if op == '==':
+                    self.emit(f"\tJP\tNZ,{false_label}")
+                elif op == '!=':
+                    self.emit(f"\tJP\tZ,{false_label}")
+                elif op == '<':
+                    self.emit(f"\tJP\tNC,{false_label}")
+                elif op == '>=':
+                    self.emit(f"\tJP\tC,{false_label}")
+                elif op == '>':
+                    self.emit(f"\tJP\tC,{false_label}")
+                    self.emit(f"\tJP\tZ,{false_label}")
+                elif op == '<=':
+                    true_lbl = self.new_label("TRUE")
+                    self.emit(f"\tJP\tZ,{true_lbl}")
+                    self.emit(f"\tJP\tNC,{false_label}")
+                    self.emit_label(true_lbl)
+                return
+
+            # Optimized 16-bit comparison when right side is a constant
+            if right_const is not None:
+                # Generate: left in HL, const in DE directly (no push/pop)
+                self.gen_expr(cond.left, 'HL')
+                self.emit(f"\tLD\tDE,{right_const}")
+            else:
+                # General comparison with push/pop
+                self.gen_expr(cond.left, 'HL')
+                self.emit("\tPUSH\tHL")
+                self.gen_expr(cond.right, 'HL')
+                self.emit("\tEX\tDE,HL")
+                self.emit("\tPOP\tHL")
+
+            # Compare HL with DE
+            self.emit("\tLD\tA,H")
+            self.emit("\tCP\tD")
+            self.emit("\tJP\tNZ,$+6")
+            self.emit("\tLD\tA,L")
+            self.emit("\tCP\tE")
             # Branch based on comparison
             if op == '==':
-                self.emit(f"\tJNZ\t{false_label}")
+                self.emit(f"\tJP\tNZ,{false_label}")
             elif op == '!=':
-                self.emit(f"\tJZ\t{false_label}")
+                self.emit(f"\tJP\tZ,{false_label}")
             elif op == '<':
-                self.emit(f"\tJNC\t{false_label}")
+                self.emit(f"\tJP\tNC,{false_label}")
             elif op == '>=':
-                self.emit(f"\tJC\t{false_label}")
+                self.emit(f"\tJP\tC,{false_label}")
             elif op == '>':
-                self.emit(f"\tJC\t{false_label}")
-                self.emit(f"\tJZ\t{false_label}")
+                self.emit(f"\tJP\tC,{false_label}")
+                self.emit(f"\tJP\tZ,{false_label}")
             elif op == '<=':
                 true_lbl = self.new_label("TRUE")
-                self.emit(f"\tJZ\t{true_lbl}")
-                self.emit(f"\tJNC\t{false_label}")
+                self.emit(f"\tJP\tZ,{true_lbl}")
+                self.emit(f"\tJP\tNC,{false_label}")
                 self.emit_label(true_lbl)
             return
 
@@ -983,7 +1383,7 @@ class CodeGenerator:
             # !x -> branch if x is true
             true_label = self.new_label("TRUE")
             self.gen_condition_branch(cond.operand, true_label)
-            self.emit(f"\tJMP\t{false_label}")
+            self.emit(f"\tJP\t{false_label}")
             self.emit_label(true_label)
             return
 
@@ -1003,8 +1403,8 @@ class CodeGenerator:
 
         # Default: evaluate and test
         self.gen_expr(cond, 'A')
-        self.emit("\tORA\tA")
-        self.emit(f"\tJZ\t{false_label}")
+        self.emit("\tOR\tA")
+        self.emit(f"\tJP\tZ,{false_label}")
 
     def gen_if(self, stmt: ast.IfStmt) -> None:
         """Generate if statement."""
@@ -1021,7 +1421,7 @@ class CodeGenerator:
         for s in stmt.then_body:
             self.gen_stmt(s)
         if stmt.elseifs or stmt.else_body:
-            self.emit(f"\tJMP\t{end_label}")
+            self.emit(f"\tJP\t{end_label}")
 
         # Elseifs
         for i, (cond, body) in enumerate(stmt.elseifs):
@@ -1034,7 +1434,7 @@ class CodeGenerator:
 
             for s in body:
                 self.gen_stmt(s)
-            self.emit(f"\tJMP\t{end_label}")
+            self.emit(f"\tJP\t{end_label}")
 
         # Else
         if stmt.else_body:
@@ -1059,7 +1459,7 @@ class CodeGenerator:
         for s in stmt.body:
             self.gen_stmt(s)
 
-        self.emit(f"\tJMP\t{loop_label}")
+        self.emit(f"\tJP\t{loop_label}")
         self.emit_label(end_label)
 
         self.break_labels.pop()
@@ -1076,7 +1476,7 @@ class CodeGenerator:
         self.emit_label(loop_label)
         for s in stmt.body:
             self.gen_stmt(s)
-        self.emit(f"\tJMP\t{loop_label}")
+        self.emit(f"\tJP\t{loop_label}")
         self.emit_label(end_label)
 
         self.break_labels.pop()
@@ -1088,37 +1488,37 @@ class CodeGenerator:
 
         # Evaluate expression
         self.gen_expr(stmt.expr, 'HL')
-        self.emit("\tPUSH\tH")
+        self.emit("\tPUSH\tHL")
 
         for values, body in stmt.whens:
             next_when = self.new_label("WHEN")
 
             for val in values:
-                self.emit("\tPOP\tH")
-                self.emit("\tPUSH\tH")
+                self.emit("\tPOP\tHL")
+                self.emit("\tPUSH\tHL")
                 self.gen_expr(val, 'HL')
-                self.emit("\tXCHG")
-                self.emit("\tPOP\tH")
-                self.emit("\tPUSH\tH")
+                self.emit("\tEX\tDE,HL")
+                self.emit("\tPOP\tHL")
+                self.emit("\tPUSH\tHL")
 
                 # Compare
-                self.emit("\tMOV\tA,H")
-                self.emit("\tCMP\tD")
-                self.emit(f"\tJNZ\t{next_when}")
-                self.emit("\tMOV\tA,L")
-                self.emit("\tCMP\tE")
-                self.emit(f"\tJNZ\t{next_when}")
+                self.emit("\tLD\tA,H")
+                self.emit("\tCP\tD")
+                self.emit(f"\tJP\tNZ,{next_when}")
+                self.emit("\tLD\tA,L")
+                self.emit("\tCP\tE")
+                self.emit(f"\tJP\tNZ,{next_when}")
 
             # Match found
-            self.emit("\tPOP\tH")  # Clean stack
+            self.emit("\tPOP\tHL")  # Clean stack
             for s in body:
                 self.gen_stmt(s)
-            self.emit(f"\tJMP\t{end_label}")
+            self.emit(f"\tJP\t{end_label}")
 
             self.emit_label(next_when)
 
         # Else clause
-        self.emit("\tPOP\tH")  # Clean stack
+        self.emit("\tPOP\tHL")  # Clean stack
         if stmt.else_body:
             for s in stmt.else_body:
                 self.gen_stmt(s)
@@ -1167,6 +1567,10 @@ class CodeGenerator:
         if decl.body is None:
             return  # Forward declaration
 
+        # Skip generating subs that were inlined
+        if decl.name in self.inlined_subs:
+            return
+
         self.current_sub = decl.name
 
         # Get params/returns from checker for @impl (since decl.params is empty)
@@ -1201,17 +1605,17 @@ class CodeGenerator:
             var = self.variables.get(param_name)
             if var:
                 mangled = self.mangle_name(param_name)
-                self.emit(f"\tLXI\tH,{offset}")
-                self.emit("\tDAD\tSP")
+                self.emit(f"\tLD\tHL,{offset}")
+                self.emit("\tADD\tHL,SP")
                 if var.size == 1:
-                    self.emit("\tMOV\tA,M")
-                    self.emit(f"\tSTA\t{mangled}")
+                    self.emit("\tLD\tA,(HL)")
+                    self.emit(f"\tLD\t({mangled}),A")
                 else:
-                    self.emit("\tMOV\tE,M")
-                    self.emit("\tINX\tH")
-                    self.emit("\tMOV\tD,M")
-                    self.emit("\tXCHG")
-                    self.emit(f"\tSHLD\t{mangled}")
+                    self.emit("\tLD\tE,(HL)")
+                    self.emit("\tINC\tHL")
+                    self.emit("\tLD\tD,(HL)")
+                    self.emit("\tEX\tDE,HL")
+                    self.emit(f"\tLD\t({mangled}),HL")
                 offset += 2
 
         # Body
@@ -1224,11 +1628,11 @@ class CodeGenerator:
             var = self.variables.get(ret_var)
             mangled_ret = self.mangle_name(ret_var)
             if var and var.size == 1:
-                self.emit(f"\tLDA\t{mangled_ret}")
-                self.emit("\tMOV\tL,A")
-                self.emit("\tMVI\tH,0")
+                self.emit(f"\tLD\tA,({mangled_ret})")
+                self.emit("\tLD\tL,A")
+                self.emit("\tLD\tH,0")
             else:
-                self.emit(f"\tLHLD\t{mangled_ret}")
+                self.emit(f"\tLD\tHL,({mangled_ret})")
 
         self.emit("\tRET")
 
@@ -1243,9 +1647,12 @@ class CodeGenerator:
 
     def gen_program(self, program: ast.Program) -> str:
         """Generate complete program."""
+        # Analyze for inlining opportunities before code generation
+        self.analyze_for_inlining(program)
+
         self.emit("; Generated by ucow")
         self.emit("")
-        self.emit("\t.8080")
+        self.emit("\t.Z80")
         self.emit("")
 
         # Use CSEG for code segment (will be linked at 0100H)
@@ -1253,7 +1660,7 @@ class CodeGenerator:
         self.emit("")
 
         # Jump to main
-        self.emit("\tJMP\t_main")
+        self.emit("\tJP\t_main")
         self.emit("")
 
         # Include runtime
@@ -1281,18 +1688,11 @@ class CodeGenerator:
             self.gen_stmt(stmt)
 
         # Exit
-        self.emit("\tJMP\t0")  # Warm boot
+        self.emit("\tJP\t0")  # Warm boot
         self.emit("")
 
-        # Data segment
-        self.emit("; Data segment")
-        self.emit_label("_data")
-
-        # Variables
-        for name, var in self.variables.items():
-            self.emit(f"{self.mangle_name(name)}:\tDS\t{var.size}")
-
-        # String literals
+        # String literals (stay in CSEG - they're read-only)
+        self.emit("; String literals")
         for value, label in self.string_literals.items():
             # Output as individual bytes to handle control characters
             bytes_str = ','.join(str(ord(c)) for c in value)
@@ -1300,6 +1700,40 @@ class CodeGenerator:
                 self.emit(f"{label}:\tDB\t{bytes_str},0")
             else:
                 self.emit(f"{label}:\tDB\t0")
+
+        # Initialized arrays (stay in CSEG - they contain initial values)
+        self.emit("; Initialized data")
+        for name, var in self.variables.items():
+            if name in self.array_initializers:
+                # Emit initialized array data
+                values, elem_size = self.array_initializers[name]
+                mangled = self.mangle_name(name)
+                if elem_size == 1:
+                    # Emit in chunks of 16 for readability
+                    for i in range(0, len(values), 16):
+                        chunk = values[i:i+16]
+                        bytes_str = ','.join(str(v & 0xFF) for v in chunk)
+                        if i == 0:
+                            self.emit(f"{mangled}:\tDB\t{bytes_str}")
+                        else:
+                            self.emit(f"\tDB\t{bytes_str}")
+                else:
+                    # 16-bit values
+                    for i in range(0, len(values), 8):
+                        chunk = values[i:i+8]
+                        words_str = ','.join(str(v & 0xFFFF) for v in chunk)
+                        if i == 0:
+                            self.emit(f"{mangled}:\tDW\t{words_str}")
+                        else:
+                            self.emit(f"\tDW\t{words_str}")
+
+        # Uninitialized variables (in DSEG for proper relocation)
+        self.emit("")
+        self.emit("\tDSEG")
+        self.emit("; Variables")
+        for name, var in self.variables.items():
+            if name not in self.array_initializers:
+                self.emit(f"{self.mangle_name(name)}:\tDS\t{var.size}")
 
         self.emit("")
         self.emit("\tEND")
@@ -1328,84 +1762,158 @@ class CodeGenerator:
             next3 = lines[i + 3].strip() if i + 3 < len(lines) else ""
 
             # Pattern: PUSH H / POP H -> remove both (no-op)
-            if curr == "PUSH\tH" and next1 == "POP\tH":
+            if curr == "PUSH\tHL" and next1 == "POP\tHL":
                 i += 2
                 optimizations += 1
                 continue
 
             # Pattern: PUSH D / POP D -> remove both (no-op)
-            if curr == "PUSH\tD" and next1 == "POP\tD":
+            if curr == "PUSH\tDE" and next1 == "POP\tDE":
                 i += 2
                 optimizations += 1
                 continue
 
             # Pattern: PUSH PSW / POP PSW -> remove both (no-op)
-            if curr == "PUSH\tPSW" and next1 == "POP\tPSW":
+            if curr == "PUSH\tAF" and next1 == "POP\tAF":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LD HL,(x) / PUSH HL / LD HL,(y) / EX DE,HL / POP HL -> LD HL,(y) / EX DE,HL / LD HL,(x)
+            # This is a very common pattern for loading two 16-bit operands
+            if (curr.startswith("LD\tHL,(") and next1 == "PUSH\tHL" and
+                next2.startswith("LD\tHL,(") and next3 == "EX\tDE,HL"):
+                next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
+                if next4 == "POP\tHL":
+                    # var_x and var_y include the parens, e.g. "(xxx)"
+                    var_x = curr[6:]  # "(xxx)" from "LD HL,(xxx)"
+                    var_y = next2[6:]
+                    result.append(f"\tLD\tHL,{var_y}")
+                    result.append("\tEX\tDE,HL")
+                    result.append(f"\tLD\tHL,{var_x}")
+                    i += 5
+                    optimizations += 1
+                    continue
+
+            # Pattern: PUSH HL / LD HL,(x) / EX DE,HL / POP HL / EX DE,HL -> EX DE,HL / LD HL,(x)
+            # This saves old HL into DE, then loads x into HL
+            if (curr == "PUSH\tHL" and next1.startswith("LD\tHL,(") and
+                next2 == "EX\tDE,HL" and next3 == "POP\tHL"):
+                next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
+                if next4 == "EX\tDE,HL":
+                    var = next1[6:]  # "(xxx)" from "LD HL,(xxx)"
+                    result.append("\tEX\tDE,HL")
+                    result.append(f"\tLD\tHL,{var}")
+                    i += 5
+                    optimizations += 1
+                    continue
+
+            # Pattern: PUSH HL / LD HL,(x) / INC HL / EX DE,HL / POP HL / EX DE,HL -> EX DE,HL / LD HL,(x) / INC HL
+            # This saves old HL into DE, then loads x+1 into HL
+            if (curr == "PUSH\tHL" and next1.startswith("LD\tHL,(") and
+                next2 == "INC\tHL" and next3 == "EX\tDE,HL"):
+                next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
+                next5 = lines[i + 5].strip() if i + 5 < len(lines) else ""
+                if next4 == "POP\tHL" and next5 == "EX\tDE,HL":
+                    var = next1[6:]  # "(xxx)" from "LD HL,(xxx)"
+                    result.append("\tEX\tDE,HL")
+                    result.append(f"\tLD\tHL,{var}")
+                    result.append("\tINC\tHL")
+                    i += 6
+                    optimizations += 1
+                    continue
+
+            # Pattern: PUSH B / POP B -> remove both
+            if curr == "PUSH\tBC" and next1 == "POP\tBC":
                 i += 2
                 optimizations += 1
                 continue
 
             # Pattern: MOV A,L / MOV L,A -> remove second (redundant)
-            if curr == "MOV\tA,L" and next1 == "MOV\tL,A":
+            if curr == "LD\tA,L" and next1 == "LD\tL,A":
                 result.append(lines[i])
                 i += 2
                 optimizations += 1
                 continue
 
             # Pattern: MOV L,A / MOV A,L -> remove second (redundant)
-            if curr == "MOV\tL,A" and next1 == "MOV\tA,L":
+            if curr == "LD\tL,A" and next1 == "LD\tA,L":
                 result.append(lines[i])
                 i += 2
                 optimizations += 1
                 continue
 
-            # Pattern: SHLD x / LHLD x -> remove LHLD (HL already has value)
-            if curr.startswith("SHLD\t"):
-                var = curr[5:]
-                if next1 == f"LHLD\t{var}":
+            # Pattern: LD (x),HL / LD HL,(x) -> remove second (HL already has value)
+            if curr.startswith("LD\t(") and curr.endswith("),HL"):
+                var = curr[4:-4]  # Extract x from "LD (x),HL"
+                if next1 == f"LD\tHL,({var})":
                     result.append(lines[i])
                     i += 2
                     optimizations += 1
                     continue
 
-            # Pattern: STA x / LDA x -> remove LDA (A already has value)
-            if curr.startswith("STA\t"):
-                var = curr[4:]
-                if next1 == f"LDA\t{var}":
+            # Pattern: LD (x),A / LD A,(x) -> remove second (A already has value)
+            if curr.startswith("LD\t(") and curr.endswith("),A"):
+                var = curr[4:-3]  # Extract x from "LD (x),A"
+                if next1 == f"LD\tA,({var})":
                     result.append(lines[i])
                     i += 2
                     optimizations += 1
                     continue
 
-            # Pattern: LXI H,x / SHLD y / LHLD y -> LXI H,x / SHLD y
-            if curr.startswith("LXI\tH,"):
-                if next1.startswith("SHLD\t"):
-                    var = next1[5:]
-                    if next2 == f"LHLD\t{var}":
+            # Pattern: LD HL,x / LD (y),HL / LD HL,(y) -> LD HL,x / LD (y),HL
+            if curr.startswith("LD\tHL,") and not curr.startswith("LD\tHL,("):
+                if next1.startswith("LD\t(") and next1.endswith("),HL"):
+                    var = next1[4:-4]  # Extract y from "LD (y),HL"
+                    if next2 == f"LD\tHL,({var})":
                         result.append(lines[i])
                         result.append(lines[i + 1])
                         i += 3
                         optimizations += 1
                         continue
 
-            # Pattern: MVI A,x / STA y / LDA y -> MVI A,x / STA y
-            if curr.startswith("MVI\tA,"):
-                if next1.startswith("STA\t"):
-                    var = next1[4:]
-                    if next2 == f"LDA\t{var}":
+            # Pattern: LD A,x / LD (y),A / LD A,(y) -> LD A,x / LD (y),A
+            if curr.startswith("LD\tA,") and not curr.startswith("LD\tA,("):
+                if next1.startswith("LD\t(") and next1.endswith("),A"):
+                    var = next1[4:-3]  # Extract y from "LD (y),A"
+                    if next2 == f"LD\tA,({var})":
                         result.append(lines[i])
                         result.append(lines[i + 1])
                         i += 3
                         optimizations += 1
                         continue
 
-            # Pattern: LXI H,0 / DAD D -> XCHG (when just want DE in HL)
+            # Pattern: LXI H,0 / DAD D -> EX\tDE,HL (when just want DE in HL)
             # Can't do this safely without knowing context
+
+            # Pattern: LXI D,2 / CALL _mul16 -> DAD H (multiply by 2 is left shift)
+            if curr == "LD\tDE,2" and next1 == "CALL\t_mul16":
+                result.append("\tADD\tHL,HL")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LXI D,4 / CALL _mul16 -> DAD H / DAD H (multiply by 4)
+            if curr == "LD\tDE,4" and next1 == "CALL\t_mul16":
+                result.append("\tADD\tHL,HL")
+                result.append("\tADD\tHL,HL")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LXI D,8 / CALL _mul16 -> DAD H / DAD H / DAD H (multiply by 8)
+            if curr == "LD\tDE,8" and next1 == "CALL\t_mul16":
+                result.append("\tADD\tHL,HL")
+                result.append("\tADD\tHL,HL")
+                result.append("\tADD\tHL,HL")
+                i += 2
+                optimizations += 1
+                continue
 
             # Pattern: CALL sub / RET -> JMP sub (tail call)
             if curr.startswith("CALL\t") and next1 == "RET":
                 sub = curr[5:]
-                result.append(f"\tJMP\t{sub}")
+                result.append(f"\tJP\t{sub}")
                 i += 2
                 optimizations += 1
                 continue
@@ -1414,7 +1922,7 @@ class CodeGenerator:
             # Keep as is - needed for proper zero extension
 
             # Pattern: JMP to next instruction -> remove
-            if curr.startswith("JMP\t"):
+            if curr.startswith("JP\t"):
                 target = curr[4:]
                 if next1 == f"{target}:":
                     i += 1
@@ -1422,32 +1930,32 @@ class CodeGenerator:
                     continue
 
             # Pattern: LXI H,x / LXI H,y -> keep only second
-            if curr.startswith("LXI\tH,") and next1.startswith("LXI\tH,"):
+            if curr.startswith("LD\tHL,") and next1.startswith("LD\tHL,"):
                 i += 1
                 optimizations += 1
                 continue
 
             # Pattern: MVI A,x / MVI A,y -> keep only second
-            if curr.startswith("MVI\tA,") and next1.startswith("MVI\tA,"):
+            if curr.startswith("LD\tA,") and next1.startswith("LD\tA,"):
                 i += 1
                 optimizations += 1
                 continue
 
             # Pattern: XRA A / MVI A,0 -> keep only XRA A
-            if curr == "XRA\tA" and next1 == "MVI\tA,0":
+            if curr == "XOR\tA" and next1 == "LD\tA,0":
                 result.append(lines[i])
                 i += 2
                 optimizations += 1
                 continue
 
             # Pattern: MVI A,0 / XRA A -> keep only XRA A (shorter)
-            if curr == "MVI\tA,0" and next1 == "XRA\tA":
+            if curr == "LD\tA,0" and next1 == "XOR\tA":
                 i += 1  # Skip MVI, keep XRA
                 optimizations += 1
                 continue
 
             # Pattern: ORA A / ORA A -> keep one
-            if curr == "ORA\tA" and next1 == "ORA\tA":
+            if curr == "OR\tA" and next1 == "OR\tA":
                 result.append(lines[i])
                 i += 2
                 optimizations += 1
@@ -1461,72 +1969,349 @@ class CodeGenerator:
                 continue
 
             # Pattern: MOV L,A / MVI H,0 / MOV L,A / MVI H,0 -> keep first pair
-            if curr == "MOV\tL,A" and next1 == "MVI\tH,0" and next2 == "MOV\tL,A" and next3 == "MVI\tH,0":
+            if curr == "LD\tL,A" and next1 == "LD\tH,0" and next2 == "LD\tL,A" and next3 == "LD\tH,0":
                 result.append(lines[i])
                 result.append(lines[i + 1])
                 i += 4
                 optimizations += 1
                 continue
 
+            # Pattern: MOV L,A / MVI H,0 / MOV A,L -> MOV L,A / MVI H,0 (A already has value)
+            if curr == "LD\tL,A" and next1 == "LD\tH,0" and next2 == "LD\tA,L":
+                result.append(lines[i])
+                result.append(lines[i + 1])
+                i += 3
+                optimizations += 1
+                continue
+
+            # Pattern: MOV L,A / MVI H,0 / MOV A,H -> MOV L,A / MVI H,0 / XRA A (H is 0)
+            # Actually: MOV L,A / XRA A / MOV H,A saves one byte but changes semantics
+            # Safer: MOV L,A / MVI H,0 / XRA A (same length, clearer)
+            # Wait, we can't change to XRA A if next instructions need flags!
+            # Just keep as-is for now - MOV A,H after MVI H,0 gives A=0
+
             # Pattern: consecutive identical instructions -> keep one
-            if curr == next1 and curr not in ["RET", ""] and not curr.endswith(":"):
+            # IMPORTANT: Don't remove duplicate CALLs - they have side effects!
+            # IMPORTANT: Don't remove duplicate INC/DEC - they have cumulative effects!
+            # IMPORTANT: Don't remove duplicate EX - swapping twice restores original state
+            #            but code may depend on intermediate state (e.g., value in DE after first swap)
+            if (curr == next1 and curr not in ["RET", ""] and
+                not curr.endswith(":") and not curr.startswith("CALL") and
+                not curr.startswith("INC") and not curr.startswith("DEC") and
+                not curr.startswith("ADD") and not curr.startswith("SUB") and
+                not curr.startswith("PUSH") and not curr.startswith("POP") and
+                not curr.startswith("EX")):
                 result.append(lines[i])
                 i += 2
                 optimizations += 1
                 continue
 
-            # Pattern: LHLD x / PUSH H / LXI H,const / XCHG / POP H / DAD D -> LHLD x / LXI D,const / DAD D
-            if (curr.startswith("LHLD\t") and next1 == "PUSH\tH" and
-                next2.startswith("LXI\tH,") and next3 == "XCHG"):
+            # Pattern: LHLD x / PUSH H / LXI H,const / EX\tDE,HL / POP H / DAD D -> LHLD x / LXI D,const / DAD D
+            if (curr.startswith("LD\tHL,(") and next1 == "PUSH\tHL" and
+                next2.startswith("LD\tHL,") and next3 == "EX\tDE,HL"):
                 next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
                 next5 = lines[i + 5].strip() if i + 5 < len(lines) else ""
-                if next4 == "POP\tH" and next5 == "DAD\tD":
+                if next4 == "POP\tHL" and next5 == "ADD\tHL,DE":
                     const = next2[6:]
                     result.append(lines[i])  # LHLD x
-                    result.append(f"\tLXI\tD,{const}")
-                    result.append("\tDAD\tD")
+                    result.append(f"\tLD\tDE,{const}")
+                    result.append("\tADD\tHL,DE")
                     i += 6
                     optimizations += 1
                     continue
 
-            # Pattern: PUSH H / LXI H,const / XCHG / POP H / DAD D / SHLD x -> LXI D,const / DAD D / SHLD x
-            if (curr == "PUSH\tH" and next1.startswith("LXI\tH,") and
-                next2 == "XCHG" and next3 == "POP\tH"):
-                next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
-                if next4 == "DAD\tD":
-                    const = next1[6:]
-                    result.append(f"\tLXI\tD,{const}")
-                    result.append("\tDAD\tD")
-                    i += 5
-                    optimizations += 1
-                    continue
+            # Pattern: PUSH H / LXI H,const / EX\tDE,HL / POP H -> LXI D,const (loads DE while preserving HL)
+            if (curr == "PUSH\tHL" and next1.startswith("LD\tHL,") and
+                next2 == "EX\tDE,HL" and next3 == "POP\tHL"):
+                const = next1[6:]
+                result.append(f"\tLD\tDE,{const}")
+                i += 4
+                optimizations += 1
+                continue
+
+            # Pattern: PUSH H / LXI H,addr / POP D / DAD D -> LXI D,addr / DAD D
+            # Common for array indexing: computing &arr[index] where HL has index
+            if (curr == "PUSH\tHL" and next1.startswith("LD\tHL,") and
+                next2 == "POP\tDE" and next3 == "ADD\tHL,DE"):
+                addr = next1[6:]
+                result.append(f"\tLD\tDE,{addr}")
+                result.append("\tADD\tHL,DE")
+                i += 4
+                optimizations += 1
+                continue
 
             # Pattern: MOV L,A / MVI H,0 / PUSH H / CALL x / POP D -> use A directly for 8-bit arg
             # This is complex, skip for now
 
             # Pattern: LDA x / MOV L,A / MVI H,0 / MOV A,H / ORA L -> LDA x / ORA A (test for zero)
-            if curr.startswith("LDA\t"):
-                if next1 == "MOV\tL,A" and next2 == "MVI\tH,0" and next3 == "MOV\tA,H":
+            if curr.startswith("LD\tA,("):
+                if next1 == "LD\tL,A" and next2 == "LD\tH,0" and next3 == "LD\tA,H":
                     next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
                     if next4 == "ORA\tL":
                         result.append(lines[i])  # LDA x
-                        result.append("\tORA\tA")
+                        result.append("\tOR\tA")
                         i += 5
                         optimizations += 1
                         continue
 
             # Pattern: PUSH PSW / MVI A,const / MOV B,A / POP PSW / ADD B -> ADI const
-            if curr == "PUSH\tPSW" and next1.startswith("MVI\tA,") and next2 == "MOV\tB,A" and next3 == "POP\tPSW":
+            if curr == "PUSH\tAF" and next1.startswith("LD\tA,") and next2 == "MOV\tB,A" and next3 == "POP\tAF":
                 next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
                 if next4 == "ADD\tB":
                     const = next1[6:]
-                    result.append(f"\tADI\t{const}")
+                    result.append(f"\tADD\tA,{const}")
                     i += 5
                     optimizations += 1
                     continue
 
             # Pattern: MOV A,L (or LDA x) / STA y / ... / LDA y where A still has value
             # Complex tracking needed, skip
+
+            # Pattern: EX\tDE,HL / EX\tDE,HL -> remove both (no-op)
+            # DISABLED: This is only safe if neither HL nor DE values are needed
+            # after. In binary ops like ADD HL,DE we need DE to have the value
+            # that was in HL before the first EX, but removing both loses it.
+            # if curr == "EX\tDE,HL" and next1 == "EX\tDE,HL":
+            #     i += 2
+            #     optimizations += 1
+            #     continue
+
+            # Pattern: INX H / DCX H -> remove both (no-op)
+            if curr == "INC\tHL" and next1 == "DEC\tHL":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: DCX H / INX H -> remove both (no-op)
+            if curr == "DEC\tHL" and next1 == "INC\tHL":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LXI H,0 / MOV A,L / ORA H -> XRA A (test for zero simpler)
+            if curr == "LD\tHL,0" and next1 == "LD\tA,L" and next2 == "ORA\tH":
+                result.append("\tXOR\tA")
+                i += 3
+                optimizations += 1
+                continue
+
+            # Pattern: LXI H,0 / MOV A,L -> XRA A (loading zero into A)
+            if curr == "LD\tHL,0" and next1 == "LD\tA,L":
+                result.append("\tXOR\tA")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LXI H,0 / DAD H -> LXI H,0 (0*2 = 0, DAD is useless)
+            if curr == "LD\tHL,0" and next1 == "ADD\tHL,HL":
+                result.append("\tLD\tHL,0")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LXI H,const / DAD H -> LXI H,const*2 (constant folding)
+            if curr.startswith("LD\tHL,") and next1 == "ADD\tHL,HL":
+                const_str = curr[6:]
+                try:
+                    const = int(const_str)
+                    result.append(f"\tLD\tHL,{const * 2}")
+                    i += 2
+                    optimizations += 1
+                    continue
+                except ValueError:
+                    pass  # Not a numeric constant, skip
+
+            # Pattern: LXI H,0 / LXI D,addr / DAD D -> LXI H,addr (0 + addr = addr)
+            if curr == "LD\tHL,0" and next1.startswith("LD\tDE,") and next2 == "ADD\tHL,DE":
+                addr = next1[6:]
+                result.append(f"\tLD\tHL,{addr}")
+                i += 3
+                optimizations += 1
+                continue
+
+            # Pattern: MVI A,0 / ORA A -> XRA A (shorter)
+            if curr == "LD\tA,0" and next1 == "OR\tA":
+                result.append("\tXOR\tA")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: CALL x / RET -> JMP x (tail call optimization)
+            if curr.startswith("CALL\t") and next1 == "RET":
+                target = curr[5:]
+                result.append(f"\tJP\t{target}")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: PUSH H / LXI H,0 / EX\tDE,HL / POP H / MOV A,H / CMP D -> MOV A,H / ORA L
+            # This is comparing HL with 0
+            if (curr == "PUSH\tHL" and next1 == "LD\tHL,0" and
+                next2 == "EX\tDE,HL" and next3 == "POP\tHL"):
+                next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
+                next5 = lines[i + 5].strip() if i + 5 < len(lines) else ""
+                if next4 == "LD\tA,H" and next5 == "CMP\tD":
+                    # This is comparing HL with zero - simplify to ORA
+                    result.append("\tLD\tA,H")
+                    result.append("\tOR\tL")
+                    i += 6
+                    # Skip the rest of the comparison (JNZ $+6 / MOV A,L / CMP E)
+                    while i < len(lines):
+                        check = lines[i].strip()
+                        if check.startswith("JNZ\t$") or check == "LD\tA,L" or check == "CMP\tE":
+                            i += 1
+                        else:
+                            break
+                    optimizations += 1
+                    continue
+
+            # Pattern: LHLD x / MOV A,L / MOV L,A -> LHLD x / MOV A,L
+            if curr.startswith("LD\tHL,(") and next1 == "LD\tA,L" and next2 == "LD\tL,A":
+                result.append(lines[i])
+                result.append("\tLD\tA,L")
+                i += 3
+                optimizations += 1
+                continue
+
+            # Pattern: DAD D / EX\tDE,HL / POP H / EX\tDE,HL -> DAD D / POP D
+            # Effect: HL=HL+DE, DE=popped. Same result with 2 fewer instructions.
+            if curr == "ADD\tHL,DE" and next1 == "EX\tDE,HL" and next2 == "POP\tHL" and next3 == "EX\tDE,HL":
+                result.append("\tADD\tHL,DE")
+                result.append("\tPOP\tDE")
+                i += 4
+                optimizations += 1
+                continue
+
+            # Pattern: EX\tDE,HL / POP H / EX\tDE,HL -> POP D (when we just want to pop into DE)
+            # But only if what's in HL doesn't matter - need context
+            # Let's handle the LXI case: LXI H,x / EX\tDE,HL / POP H / EX\tDE,HL -> LXI D,x / POP H
+            if (curr.startswith("LD\tHL,") and next1 == "EX\tDE,HL" and
+                next2 == "POP\tHL" and next3 == "EX\tDE,HL"):
+                addr = curr[6:]
+                result.append(f"\tLD\tDE,{addr}")
+                result.append("\tPOP\tHL")
+                i += 4
+                optimizations += 1
+                continue
+
+            # === STRENGTH REDUCTION PATTERNS ===
+
+            # Pattern: ANI 0FFH -> remove (no-op, A AND 0xFF = A)
+            if curr == "ANI\t0FFH" or curr == "ANI\t255":
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: ORI 0 -> remove (no-op, A OR 0 = A)
+            if curr == "ORI\t0":
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: ANI 0 -> XRA A (A AND 0 = 0)
+            if curr == "ANI\t0":
+                result.append("\tXOR\tA")
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: ADI 0 -> remove (no-op, A + 0 = A)
+            if curr == "ADI\t0":
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: SUI 0 -> remove (no-op, A - 0 = A)
+            if curr == "SUI\t0":
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: XRA A / ORA A -> XRA A (ORA A after XRA A is redundant)
+            if curr == "XOR\tA" and next1 == "OR\tA":
+                result.append(lines[i])
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LXI H,0 / DAD D -> EX\tDE,HL (0 + DE = DE, put in HL)
+            if curr == "LD\tHL,0" and next1 == "ADD\tHL,DE":
+                result.append("\tEX\tDE,HL")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LXI D,0 / DAD D -> (remove, HL + 0 = HL)
+            if curr == "LD\tDE,0" and next1 == "ADD\tHL,DE":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LXI D,1 / DAD D -> INX H (HL + 1)
+            if curr == "LD\tDE,1" and next1 == "ADD\tHL,DE":
+                result.append("\tINC\tHL")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LXI D,2 / DAD D -> INX H / INX H (HL + 2)
+            if curr == "LD\tDE,2" and next1 == "ADD\tHL,DE":
+                result.append("\tINC\tHL")
+                result.append("\tINC\tHL")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LXI D,3 / DAD D -> INX H / INX H / INX H (HL + 3)
+            if curr == "LD\tDE,3" and next1 == "ADD\tHL,DE":
+                result.append("\tINC\tHL")
+                result.append("\tINC\tHL")
+                result.append("\tINC\tHL")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: MOV A,A -> remove (no-op)
+            if curr == "MOV\tA,A":
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: MOV B,B -> remove (no-op)
+            if curr == "MOV\tB,B":
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: MOV C,C -> remove (no-op)
+            if curr == "MOV\tC,C":
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: MOV D,D -> remove (no-op)
+            if curr == "MOV\tD,D":
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: MOV E,E -> remove (no-op)
+            if curr == "MOV\tE,E":
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: MOV H,H -> remove (no-op)
+            if curr == "MOV\tH,H":
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: MOV L,L -> remove (no-op)
+            if curr == "MOV\tL,L":
+                i += 1
+                optimizations += 1
+                continue
 
             # No optimization applied - keep the line
             result.append(lines[i])

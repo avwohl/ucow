@@ -10,10 +10,12 @@ from .parser import Parser, ParseError, parse_file, parse_string
 from .preprocessor import Preprocessor, PreprocessorError, preprocess_file
 from .types import TypeChecker, TypeError
 from .codegen import generate
+from .optimizer import optimize_program
 
 
 def compile_file(input_path: str, output_path: str = None,
-                 include_paths: list = None) -> bool:
+                 include_paths: list = None, optimize: bool = True,
+                 opt_debug: bool = False) -> bool:
     """Compile a Cowgol source file to 8080 assembly.
 
     Args:
@@ -41,6 +43,12 @@ def compile_file(input_path: str, output_path: str = None,
             for error in checker.errors:
                 print(f"Error: {error}", file=sys.stderr)
             return False
+
+        # Optimize AST (multi-pass until stable)
+        if optimize:
+            changes = optimize_program(program, checker, debug=opt_debug)
+            if opt_debug:
+                print(f"Optimizer: {changes} total changes")
 
         # Generate code
         asm = generate(program, checker)
@@ -99,6 +107,16 @@ def main():
         action='store_true',
         help="Dump AST and exit"
     )
+    parser.add_argument(
+        '-O0', '--no-optimize',
+        action='store_true',
+        help="Disable optimization"
+    )
+    parser.add_argument(
+        '--opt-debug',
+        action='store_true',
+        help="Show optimization debug info"
+    )
 
     args = parser.parse_args()
 
@@ -122,7 +140,11 @@ def main():
             return 1
 
     # Normal compilation
-    success = compile_file(args.input, args.output, args.include)
+    success = compile_file(
+        args.input, args.output, args.include,
+        optimize=not args.no_optimize,
+        opt_debug=args.opt_debug
+    )
     return 0 if success else 1
 
 

@@ -62,3 +62,10 @@ cpmemu test.com
 - Variables are prefixed with `v_` to avoid conflicts with 8080 register names
 - Subroutines named after registers (A, B, C, D, E, H, L, M, SP, PSW) are prefixed with `s_`
 - Constants are evaluated at compile time and substituted as literal values
+
+## Optimization Reference
+See ~/cl/mbasic/docs/history/compiler_optimizations/OPTIMIZATION_STATUS.md for machine-independent optimizations to implement:
+- Constant Folding, Strength Reduction, Algebraic Simplification
+- Dead Code Detection, Copy Propagation, CSE
+- Expression Reassociation, Boolean Simplification
+- These should be done BEFORE register allocation
