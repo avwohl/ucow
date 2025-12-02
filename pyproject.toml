@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ucow"
+dynamic = ["version"]
+description = "A Cowgol compiler for 8080/Z80 CP/M"
+readme = "README.md"
+license = "GPL-2.0-only"
+requires-python = ">=3.8"
+authors = [
+    { name = "David Given" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Compilers",
+]
+keywords = ["cowgol", "compiler", "8080", "z80", "cpm"]
+
+[project.scripts]
+ucow = "src.main:main"
+
+[project.urls]
+Homepage = "https://github.com/davidgiven/ucow"
+Repository = "https://github.com/davidgiven/ucow"
+
+[tool.hatch.version]
+path = "src/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src", "lib", "cowgol_compat"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "lib/",
+    "cowgol_compat/",
+    "README.md",
+    "LICENSE",
+]
