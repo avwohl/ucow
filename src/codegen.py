@@ -79,6 +79,10 @@ class CodeGenerator:
         self.inline_candidates: Dict[str, InlineCandidate] = {}
         self.inlined_subs: Set[str] = set()  # Subs that were inlined (don't generate)
         self.generating_inline: bool = False  # True when generating inline code
+        # External symbol tracking for multi-file linking
+        self.extern_symbols: Set[str] = set()  # External symbols to import
+        # Library mode - no main entry point or runtime
+        self.library_mode: bool = False
 
     def invalidate_regs(self) -> None:
         """Invalidate register tracking (after calls, jumps, etc)."""
@@ -930,7 +934,12 @@ class CodeGenerator:
             # Check if it's a direct subroutine call or indirect (interface variable)
             if name in self.checker.subroutines:
                 # Direct call to known subroutine
-                self.emit(f"\tCALL\t{self.mangle_sub_name(name)}")
+                # Use extern_name if defined, for cross-module calls
+                sub_info = self.checker.subroutines[name]
+                if sub_info.extern_name:
+                    self.emit(f"\tCALL\t{sub_info.extern_name}")
+                else:
+                    self.emit(f"\tCALL\t{self.mangle_sub_name(name)}")
             else:
                 # Indirect call through interface variable
                 # Load address and use _callhl helper
@@ -1586,10 +1595,15 @@ class CodeGenerator:
         # Label
         self.emit("")
         self.emit(f"; Subroutine {decl.name}")
+        mangled_name = self.mangle_sub_name(decl.name)
         if decl.extern_name:
             self.emit(f"\tPUBLIC\t{decl.extern_name}")
             self.emit_label(decl.extern_name)
-        self.emit_label(self.mangle_sub_name(decl.name))
+            # Only emit mangled name if different from extern name
+            if mangled_name != decl.extern_name:
+                self.emit_label(mangled_name)
+        else:
+            self.emit_label(mangled_name)
 
         # Allocate local variables (parameters are passed on stack)
         for param_name, param_type in params:
@@ -1655,17 +1669,30 @@ class CodeGenerator:
         self.emit("\t.Z80")
         self.emit("")
 
+        # Collect external symbols from @decl subroutines (forward declarations)
+        for decl in program.declarations:
+            if isinstance(decl, ast.SubDecl) and decl.body is None and decl.extern_name:
+                self.extern_symbols.add(decl.extern_name)
+
+        # Emit EXTRN directives for external symbols
+        if self.extern_symbols:
+            self.emit("; External symbols (from other modules)")
+            for sym in sorted(self.extern_symbols):
+                self.emit(f"\tEXTRN\t{sym}")
+            self.emit("")
+
         # Use CSEG for code segment (will be linked at 0100H)
         self.emit("\tCSEG")
         self.emit("")
 
-        # Jump to main
-        self.emit("\tJP\t_main")
-        self.emit("")
+        if not self.library_mode:
+            # Jump to main (only for main module)
+            self.emit("\tJP\t_main")
+            self.emit("")
 
-        # Include runtime
-        self.emit("\tINCLUDE\t'runtime.mac'")
-        self.emit("")
+            # Include runtime (only for main module)
+            self.emit("\tINCLUDE\t'runtime.mac'")
+            self.emit("")
 
         # First, allocate all global variables (so they're visible in subroutines)
         for stmt in program.statements:
@@ -1679,17 +1706,18 @@ class CodeGenerator:
             if isinstance(decl, ast.SubDecl):
                 self.gen_sub(decl)
 
-        # Main code
-        self.emit("")
-        self.emit("; Main program")
-        self.emit_label("_main")
+        if not self.library_mode:
+            # Main code (only for main module)
+            self.emit("")
+            self.emit("; Main program")
+            self.emit_label("_main")
 
-        for stmt in program.statements:
-            self.gen_stmt(stmt)
+            for stmt in program.statements:
+                self.gen_stmt(stmt)
 
-        # Exit
-        self.emit("\tJP\t0")  # Warm boot
-        self.emit("")
+            # Exit
+            self.emit("\tJP\t0")  # Warm boot
+            self.emit("")
 
         # String literals (stay in CSEG - they're read-only)
         self.emit("; String literals")
@@ -2320,7 +2348,14 @@ class CodeGenerator:
         return result
 
 
-def generate(program: ast.Program, checker: TypeChecker) -> str:
-    """Generate assembly from AST."""
+def generate(program: ast.Program, checker: TypeChecker, library_mode: bool = False) -> str:
+    """Generate assembly from AST.
+
+    Args:
+        program: The AST to generate code from
+        checker: The type checker with symbol information
+        library_mode: If True, generate a library module without main entry point
+    """
     gen = CodeGenerator(checker)
+    gen.library_mode = library_mode
     return gen.gen_program(program)

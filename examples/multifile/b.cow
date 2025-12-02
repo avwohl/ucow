@@ -1,0 +1,8 @@
+# b.cow - Defines the external subroutine x (library module)
+sub x(): (ret: int16) @extern("x") is
+    var i: uint8 := 5;
+    var j: uint16 := 100;
+    # Local variables use static allocation per-module
+    # Each module has its own v_i, v_j in its DSEG
+    ret := (j as int16) + (i as int16);  # Returns 105
+end sub;

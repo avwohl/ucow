@@ -1,0 +1,4 @@
+# Simple test of print_i16
+print("Testing: ");
+print_i16(42);
+print("\nDone!\n");

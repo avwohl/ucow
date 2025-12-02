@@ -1,0 +1,17 @@
+# Test division
+var a: int16 := 42;
+var b: int16 := 10;
+var q: int16 := a / b;  # Should be 4
+var r: int16 := a % b;  # Should be 2
+
+if q == 4 then
+    print("q=4 OK\n");
+else
+    print("q FAIL\n");
+end if;
+
+if r == 2 then
+    print("r=2 OK\n");
+else
+    print("r FAIL\n");
+end if;

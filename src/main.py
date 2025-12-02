@@ -15,7 +15,7 @@ from .optimizer import optimize_program
 
 def compile_file(input_path: str, output_path: str = None,
                  include_paths: list = None, optimize: bool = True,
-                 opt_debug: bool = False) -> bool:
+                 opt_debug: bool = False, library_mode: bool = False) -> bool:
     """Compile a Cowgol source file to 8080 assembly.
 
     Args:
@@ -51,7 +51,7 @@ def compile_file(input_path: str, output_path: str = None,
                 print(f"Optimizer: {changes} total changes")
 
         # Generate code
-        asm = generate(program, checker)
+        asm = generate(program, checker, library_mode=library_mode)
 
         # Write output
         output_path.write_text(asm)
@@ -117,6 +117,11 @@ def main():
         action='store_true',
         help="Show optimization debug info"
     )
+    parser.add_argument(
+        '-L', '--library',
+        action='store_true',
+        help="Library mode: no main entry point or runtime (for multi-file linking)"
+    )
 
     args = parser.parse_args()
 
@@ -143,7 +148,8 @@ def main():
     success = compile_file(
         args.input, args.output, args.include,
         optimize=not args.no_optimize,
-        opt_debug=args.opt_debug
+        opt_debug=args.opt_debug,
+        library_mode=args.library
     )
     return 0 if success else 1
 

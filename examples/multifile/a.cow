@@ -1,0 +1,8 @@
+# a.cow - Main file that calls external subroutine from b.cow
+@decl sub x(): (ret: int16) @extern("x");
+
+print("Calling x()...\n");
+var answer: int16 := x();
+print("Got: ");
+print_i16(answer);
+print("\nDone!\n");
