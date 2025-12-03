@@ -690,6 +690,46 @@ def print_combining_pass(lines: list[str], verbose: bool = False) -> tuple[list[
     return result, total_savings
 
 
+def print_a_combining_pass(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
+    """
+    Combine LD L,A / LD H,0 / CALL print_i16_nl into CALL print_a_nl
+
+    This saves 3 bytes per occurrence (6 bytes -> 3 bytes).
+    """
+    result = []
+    total_savings = 0
+    i = 0
+
+    while i < len(lines):
+        # Check for LD L,A / LD H,0 / CALL print_i16_nl
+        if (i + 2 < len(lines) and
+            lines[i].strip() == 'LD\tL,A' and
+            lines[i+1].strip() == 'LD\tH,0' and
+            lines[i+2].strip() == 'CALL\tprint_i16_nl'):
+            result.append('\tCALL\tprint_a_nl\n')
+            total_savings += 3  # 6 bytes -> 3 bytes
+            i += 3
+            continue
+
+        # Check for LD L,A / LD H,0 / JP print_i16_nl (tail calls)
+        if (i + 2 < len(lines) and
+            lines[i].strip() == 'LD\tL,A' and
+            lines[i+1].strip() == 'LD\tH,0' and
+            lines[i+2].strip() == 'JP\tprint_i16_nl'):
+            result.append('\tJP\tprint_a_nl\n')
+            total_savings += 3  # 6 bytes -> 3 bytes
+            i += 3
+            continue
+
+        result.append(lines[i])
+        i += 1
+
+    if verbose and total_savings > 0:
+        print(f"  Print A combining: {total_savings} bytes saved")
+
+    return result, total_savings
+
+
 def address_folding_pass(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
     """
     Fold address calculations: LD HL,addr / INC HL / INC HL -> LD HL,addr+2
@@ -1005,6 +1045,10 @@ def optimize_asm(asm_code: str, verbose: bool = False) -> tuple[str, int]:
 
     # Pass 8: Combine print_i16 + print_nl into print_i16_nl
     lines, savings = print_combining_pass(lines, verbose)
+    total_savings += savings
+
+    # Pass 9: Combine LD L,A / LD H,0 / CALL print_i16_nl into CALL print_a_nl
+    lines, savings = print_a_combining_pass(lines, verbose)
     total_savings += savings
 
     return ''.join(lines), total_savings

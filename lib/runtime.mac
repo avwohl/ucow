@@ -52,6 +52,14 @@ print_i16_nl:
         CALL    print_i16
         JP      print_nl        ; JP to print_nl
 
+; Print 8-bit unsigned in A followed by newline
+; Saves 3 bytes per call vs LD L,A / LD H,0 / CALL print_i16_nl
+; Bytes: 5
+print_a_nl:
+        LD      L,A
+        LD      H,0
+        JR      print_i16_nl    ; Use JR since it's close
+
 ; Print 8-bit unsigned (argument in L, or HL with H=0)
 print_i8:
         ; Fall through to print_i16 since value is in HL
