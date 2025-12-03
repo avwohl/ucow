@@ -1,0 +1,4 @@
+# Library header with forward declarations
+
+@decl sub process_a(n: uint16);
+@decl sub process_b(n: uint16);

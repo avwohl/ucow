@@ -1,0 +1,18 @@
+# Test workspace optimization
+# This file contains the main program that calls other subs
+
+include "lib.coh";
+
+# Global variables (not optimized - always allocated)
+var global_counter: uint16;
+
+# Main program statements - these call into the library
+global_counter := 0;
+
+# Call both process_a and process_b from main
+# These should have overlapping workspaces since
+# they are not concurrent (neither calls the other)
+process_a(10);
+process_b(20);
+
+print("Done\r\n");

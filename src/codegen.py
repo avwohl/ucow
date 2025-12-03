@@ -83,6 +83,11 @@ class CodeGenerator:
         self.extern_symbols: Set[str] = set()  # External symbols to import
         # Library mode - no main entry point or runtime
         self.library_mode: bool = False
+        # Workspace optimization (set by caller for multi-file mode)
+        self.call_graph = None  # CallGraph instance for workspace offsets
+        self.global_data_offset = 0  # Size of global variables
+        # Track per-subroutine local offsets when using workspace optimization
+        self.sub_local_offsets: Dict[str, int] = {}  # sub_name -> current offset within workspace
 
     def invalidate_regs(self) -> None:
         """Invalidate register tracking (after calls, jumps, etc)."""
@@ -305,12 +310,37 @@ class CodeGenerator:
         """Get size of a type in bytes."""
         return self.checker.type_size(typ)
 
-    def allocate_var(self, name: str, typ: CowType) -> Variable:
-        """Allocate storage for a variable."""
+    def allocate_var(self, name: str, typ: CowType, is_local: bool = False) -> Variable:
+        """Allocate storage for a variable.
+
+        Args:
+            name: Variable name
+            typ: Variable type
+            is_local: True if this is a subroutine local variable
+
+        When call_graph is set (workspace optimization mode), local variables
+        are allocated within their subroutine's workspace at the optimized offset.
+        Non-concurrent subroutines share the same memory addresses.
+        """
         size = self.type_size(typ)
-        var = Variable(name, typ, self.data_offset, size)
+
+        if self.call_graph and is_local and self.current_sub:
+            # Workspace optimization mode: allocate within subroutine's workspace
+            workspace_base = self.call_graph.get_workspace_offset(self.current_sub)
+
+            # Get current offset within this sub's workspace
+            if self.current_sub not in self.sub_local_offsets:
+                self.sub_local_offsets[self.current_sub] = 0
+
+            local_offset = self.sub_local_offsets[self.current_sub]
+            var = Variable(name, typ, workspace_base + local_offset, size)
+            self.sub_local_offsets[self.current_sub] += size
+        else:
+            # Standard mode: linear allocation
+            var = Variable(name, typ, self.data_offset, size)
+            self.data_offset += size
+
         self.variables[name] = var
-        self.data_offset += size
         return var
 
     def get_string_label(self, value: str) -> str:
@@ -1055,7 +1085,9 @@ class CodeGenerator:
         var = self.variables.get(stmt.name)
         is_preallocated = var is not None
         if not var:
-            var = self.allocate_var(stmt.name, var_type)
+            # Variables declared inside a subroutine are locals
+            is_local = self.current_sub is not None
+            var = self.allocate_var(stmt.name, var_type, is_local=is_local)
 
         # Generate initialization if present (even for pre-allocated globals)
         if stmt.init:
@@ -1606,11 +1638,12 @@ class CodeGenerator:
             self.emit_label(mangled_name)
 
         # Allocate local variables (parameters are passed on stack)
+        # These are locals, so they can share space with non-concurrent subs
         for param_name, param_type in params:
-            self.allocate_var(param_name, param_type)
+            self.allocate_var(param_name, param_type, is_local=True)
 
         for ret_name, ret_type in returns:
-            self.allocate_var(ret_name, ret_type)
+            self.allocate_var(ret_name, ret_type, is_local=True)
 
         # Copy parameters from stack to variables
         # Args are pushed in reverse order at call site, so first param is at lowest offset
@@ -1759,9 +1792,34 @@ class CodeGenerator:
         self.emit("")
         self.emit("\tDSEG")
         self.emit("; Variables")
-        for name, var in self.variables.items():
-            if name not in self.array_initializers:
-                self.emit(f"{self.mangle_name(name)}:\tDS\t{var.size}")
+
+        if self.call_graph:
+            # Workspace optimization mode: variables share space
+            # Emit a base symbol and use EQU for variable offsets
+            self.emit("_wsbase:")
+
+            # Compute total workspace size
+            max_offset = 0
+            for name, var in self.variables.items():
+                if name not in self.array_initializers:
+                    end = var.offset + var.size
+                    if end > max_offset:
+                        max_offset = end
+
+            # Emit the total workspace
+            if max_offset > 0:
+                self.emit(f"\tDS\t{max_offset}")
+
+            # Emit EQU directives for each variable
+            self.emit("; Variable addresses (workspace-optimized)")
+            for name, var in self.variables.items():
+                if name not in self.array_initializers:
+                    self.emit(f"{self.mangle_name(name)}\tEQU\t_wsbase+{var.offset}")
+        else:
+            # Standard mode: each variable has its own allocation
+            for name, var in self.variables.items():
+                if name not in self.array_initializers:
+                    self.emit(f"{self.mangle_name(name)}:\tDS\t{var.size}")
 
         self.emit("")
         self.emit("\tEND")

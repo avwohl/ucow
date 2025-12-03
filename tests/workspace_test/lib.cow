@@ -1,0 +1,41 @@
+# Library with two independent subroutines
+# These should be able to share workspace since they're never concurrent
+
+include "lib.coh";
+
+sub process_a(n: uint16) is
+    # Local variables that can be overlaid with process_b's locals
+    var local_a1: uint16;
+    var local_a2: uint16;
+    var local_a3: uint16;
+    var buffer_a: uint8[100];
+
+    local_a1 := n;
+    local_a2 := n * 2;
+    local_a3 := local_a1 + local_a2;
+
+    # Use the buffer
+    buffer_a[0] := local_a3 as uint8;
+end sub;
+
+sub process_b(n: uint16) is
+    # Local variables - should share space with process_a's locals
+    var local_b1: uint16;
+    var local_b2: uint16;
+    var local_b3: uint16;
+    var buffer_b: uint8[100];
+
+    local_b1 := n;
+    local_b2 := n + 5;
+    local_b3 := local_b1 * local_b2;
+
+    # Use the buffer
+    buffer_b[0] := local_b3 as uint8;
+end sub;
+
+# Helper that both subs could call (if they did)
+sub helper(x: uint16): (result: uint16) is
+    var temp: uint16;
+    temp := x + 1;
+    result := temp;
+end sub;
