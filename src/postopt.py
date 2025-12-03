@@ -647,6 +647,151 @@ def register_tracking_pass(lines: list[str], verbose: bool = False) -> tuple[lis
     return result, total_savings
 
 
+def tail_merging_pass(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
+    """
+    Merge common instruction sequences at the end of multiple code paths.
+
+    Pattern: If multiple labels are followed by identical RET sequences,
+    have earlier ones JP to the last one.
+
+    Also handles: identical trailing sequences before RET
+    """
+    result = []
+    total_savings = 0
+
+    # First pass: find all subroutine end sequences (ending in RET)
+    # Map: sequence hash -> list of (start_line_idx, sequence_lines)
+    ret_sequences = {}
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Look for RET (end of subroutine)
+        if stripped == 'RET':
+            # Look back for instructions that could be merged
+            # Start with just RET, then look for common prefixes
+            seq = [stripped]
+            start_idx = i
+
+            # Look back for simple instructions that could be part of common tail
+            j = i - 1
+            while j >= 0:
+                prev = lines[j].strip()
+                # Stop at labels, comments, empty lines, or control flow
+                if not prev or prev.startswith(';') or prev.endswith(':'):
+                    break
+                if prev.startswith('JP') or prev.startswith('JR') or prev.startswith('CALL'):
+                    break
+                # Include simple instructions in sequence
+                if (prev.startswith('LD') or prev.startswith('PUSH') or
+                    prev.startswith('POP') or prev == 'CALL print_nl' or
+                    prev.startswith('INC') or prev.startswith('DEC') or
+                    prev.startswith('ADD') or prev.startswith('EX')):
+                    seq.insert(0, prev)
+                    start_idx = j
+                    j -= 1
+                else:
+                    break
+
+            # Only consider sequences of 2+ instructions
+            if len(seq) >= 2:
+                seq_key = tuple(seq)
+                if seq_key not in ret_sequences:
+                    ret_sequences[seq_key] = []
+                ret_sequences[seq_key].append((start_idx, i))  # start and end line indices
+
+        i += 1
+
+    # Find sequences that appear multiple times
+    merged_ranges = set()
+    label_counter = 0
+
+    for seq_key, occurrences in ret_sequences.items():
+        if len(occurrences) < 2:
+            continue
+
+        # Calculate savings: (n-1) * (seq_bytes - 3) where 3 is JP instruction
+        seq_size = sum(get_instr_size(instr) or 2 for instr in seq_key)
+        savings_per_merge = seq_size - 3  # JP is 3 bytes
+
+        if savings_per_merge <= 0:
+            continue
+
+        # Keep the last occurrence, replace others with JP
+        last_start, last_end = occurrences[-1]
+
+        for start_idx, end_idx in occurrences[:-1]:
+            # Mark these ranges for modification
+            merged_ranges.add((start_idx, end_idx, last_start))
+            total_savings += savings_per_merge
+
+        label_counter += 1
+
+    # If no merging opportunities, return unchanged
+    if not merged_ranges:
+        return lines, 0
+
+    # Second pass: build result with merges applied
+    # For simplicity, we'll insert labels at merge targets
+
+    # Find the merge targets (last occurrence of each sequence)
+    merge_targets = {}  # start_idx -> label name
+    for start_idx, end_idx, target_start in merged_ranges:
+        if target_start not in merge_targets:
+            # Find a unique label name
+            # Look for existing label before target
+            j = target_start - 1
+            while j >= 0 and not lines[j].strip():
+                j -= 1
+            if j >= 0 and lines[j].strip().endswith(':'):
+                label = lines[j].strip()[:-1]
+            else:
+                label = f'_tail{len(merge_targets)}'
+            merge_targets[target_start] = label
+
+    # Rebuild output
+    i = 0
+    skip_until = -1
+
+    while i < len(lines):
+        # Check if we're in a range to be replaced with JP
+        in_merged = False
+        for start_idx, end_idx, target_start in merged_ranges:
+            if start_idx <= i <= end_idx:
+                if i == start_idx:
+                    # Replace with JP to the merged tail
+                    label = merge_targets[target_start]
+                    result.append(f'\tJP\t{label}\n')
+                # Skip the rest of the merged sequence
+                in_merged = True
+                break
+
+        if in_merged:
+            # Check if this is the end of a merged range
+            for start_idx, end_idx, target_start in merged_ranges:
+                if i == end_idx:
+                    break
+            i += 1
+            continue
+
+        # Check if we need to add a label at a merge target
+        if i in merge_targets:
+            label = merge_targets[i]
+            # Check if there's already a label
+            if not lines[i].strip().endswith(':'):
+                result.append(f'{label}:\n')
+
+        result.append(lines[i])
+        i += 1
+
+    if verbose and total_savings > 0:
+        print(f"  Tail merging: {total_savings} bytes saved")
+
+    return result, total_savings
+
+
 def optimize_asm(asm_code: str, verbose: bool = False) -> tuple[str, int]:
     """
     Run post-assembly optimizations on assembly code string.
@@ -673,6 +818,10 @@ def optimize_asm(asm_code: str, verbose: bool = False) -> tuple[str, int]:
 
     # Pass 4: Convert JP to JR where possible
     lines, savings = convert_jp_to_jr(lines, verbose)
+    total_savings += savings
+
+    # Pass 5: Tail merging (merge common code sequences)
+    lines, savings = tail_merging_pass(lines, verbose)
     total_savings += savings
 
     return ''.join(lines), total_savings

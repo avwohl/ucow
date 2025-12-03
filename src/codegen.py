@@ -1052,19 +1052,36 @@ class CodeGenerator:
 
         # Determine calling convention:
         # - 0 args: no argument passing needed
-        # - 1 arg that fits in HL (<=2 bytes): pass in HL (register calling convention)
-        # - Multiple args or >2 byte arg: push on stack (stack calling convention)
-        use_register_call = False
+        # - 1 arg that fits in HL (<=2 bytes): pass in HL
+        # - 2 args that fit in HL and DE: pass first in HL, second in DE
+        # - More args or larger: push on stack
+        use_register_call = 0  # 0=stack, 1=single reg (HL), 2=two regs (HL, DE)
         if len(expr.args) == 1:
             arg = expr.args[0]
             arg_type = arg.resolved_type if hasattr(arg, 'resolved_type') else None
             arg_size = self.type_size(arg_type) if arg_type else 2
             if arg_size <= 2:
-                use_register_call = True
+                use_register_call = 1
+        elif len(expr.args) == 2:
+            arg0 = expr.args[0]
+            arg1 = expr.args[1]
+            arg0_type = arg0.resolved_type if hasattr(arg0, 'resolved_type') else None
+            arg1_type = arg1.resolved_type if hasattr(arg1, 'resolved_type') else None
+            arg0_size = self.type_size(arg0_type) if arg0_type else 2
+            arg1_size = self.type_size(arg1_type) if arg1_type else 2
+            if arg0_size <= 2 and arg1_size <= 2:
+                use_register_call = 2
 
-        if use_register_call:
+        if use_register_call == 1:
             # Single argument: pass in HL, no push/pop needed
             self.gen_expr(expr.args[0], 'HL')
+        elif use_register_call == 2:
+            # Two arguments: first in HL, second in DE
+            # Generate second arg first (into HL), then move to DE
+            # Then generate first arg into HL
+            self.gen_expr(expr.args[1], 'HL')
+            self.emit("\tEX\tDE,HL")  # Move second arg to DE
+            self.gen_expr(expr.args[0], 'HL')  # First arg in HL
         else:
             # Push arguments in reverse order (stack calling convention)
             for arg in reversed(expr.args):
@@ -1098,7 +1115,7 @@ class CodeGenerator:
             self.emit("\tCALL\t_callhl")
 
         # Clean up arguments from stack (only for stack calling convention)
-        if not use_register_call and expr.args:
+        if use_register_call == 0 and expr.args:
             stack_bytes = len(expr.args) * 2
             if stack_bytes == 2:
                 self.emit("\tPOP\tDE")  # Discard
@@ -1760,15 +1777,23 @@ class CodeGenerator:
 
         # Determine if we use register calling convention:
         # - 1 param that fits in HL: passed in HL
+        # - 2 params that fit: first in HL, second in DE
         # - Otherwise: passed on stack
-        use_register_call = False
+        use_register_call = 0
         if len(params) == 1:
             param_name, param_type = params[0]
             param_size = self.type_size(param_type) if param_type else 2
             if param_size <= 2:
-                use_register_call = True
+                use_register_call = 1
+        elif len(params) == 2:
+            p0_name, p0_type = params[0]
+            p1_name, p1_type = params[1]
+            p0_size = self.type_size(p0_type) if p0_type else 2
+            p1_size = self.type_size(p1_type) if p1_type else 2
+            if p0_size <= 2 and p1_size <= 2:
+                use_register_call = 2
 
-        if use_register_call:
+        if use_register_call == 1:
             # Single argument passed in HL - copy to local variable
             param_name, param_type = params[0]
             var = self.get_var(param_name)
@@ -1779,6 +1804,29 @@ class CodeGenerator:
                     self.emit(f"\tLD\t({mangled}),A")
                 else:
                     self.emit(f"\tLD\t({mangled}),HL")
+        elif use_register_call == 2:
+            # Two arguments: first in HL, second in DE
+            # Copy first param from HL
+            p0_name, p0_type = params[0]
+            var0 = self.get_var(p0_name)
+            if var0:
+                mangled0 = self.mangle_name(p0_name)
+                if var0.size == 1:
+                    self.emit("\tLD\tA,L")
+                    self.emit(f"\tLD\t({mangled0}),A")
+                else:
+                    self.emit(f"\tLD\t({mangled0}),HL")
+            # Copy second param from DE
+            p1_name, p1_type = params[1]
+            var1 = self.get_var(p1_name)
+            if var1:
+                mangled1 = self.mangle_name(p1_name)
+                if var1.size == 1:
+                    self.emit("\tLD\tA,E")
+                    self.emit(f"\tLD\t({mangled1}),A")
+                else:
+                    self.emit("\tEX\tDE,HL")
+                    self.emit(f"\tLD\t({mangled1}),HL")
         else:
             # Copy parameters from stack to variables
             # Args are pushed in reverse order at call site, so first param is at lowest offset
@@ -2702,6 +2750,98 @@ class CodeGenerator:
                         i = j
                         optimizations += 1
                         continue
+
+            # Pattern: LD A,0 -> XOR A (saves 1 byte: 2 bytes vs 1 byte)
+            if curr == "LD\tA,0":
+                result.append("\tXOR\tA")
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: LD H,0 / LD L,0 -> LD HL,0 (saves 1 byte: 4 bytes vs 3 bytes)
+            if curr == "LD\tH,0" and next1 == "LD\tL,0":
+                result.append("\tLD\tHL,0")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LD L,0 / LD H,0 -> LD HL,0 (saves 1 byte)
+            if curr == "LD\tL,0" and next1 == "LD\tH,0":
+                result.append("\tLD\tHL,0")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: DEC B / JR NZ,label -> DJNZ label (saves 1 byte: 3 bytes vs 2 bytes)
+            if curr == "DEC\tB" and next1.startswith("JR\tNZ,"):
+                label = next1[6:]  # Extract label after "JR\tNZ,"
+                result.append(f"\tDJNZ\t{label}")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LD B,n / loop: ... / DEC B / JR NZ,loop
+            # This is handled by the DEC B / JR NZ pattern above
+
+            # Pattern: OR A / RET Z -> RET Z (OR A sets Z flag but RET Z doesn't need it fresh if A==0)
+            # Actually this is wrong - we need OR A to set the flag. Skip.
+
+            # Pattern: LD HL,0 / LD A,H / OR L -> XOR A (testing if HL==0, but HL is known 0)
+            if curr == "LD\tHL,0" and next1 == "LD\tA,H" and next2 == "OR\tL":
+                result.append("\tLD\tHL,0")
+                result.append("\tXOR\tA")  # A=0, Z flag set
+                i += 3
+                optimizations += 1
+                continue
+
+            # Pattern: LD A,H / OR L / JR Z,x when we just set HL to known value
+            # Complex - needs value tracking, skip for now
+
+            # Pattern: PUSH HL / POP HL -> remove (no-op)
+            if curr == "PUSH\tHL" and next1 == "POP\tHL":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: PUSH DE / POP DE -> remove (no-op)
+            if curr == "PUSH\tDE" and next1 == "POP\tDE":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: PUSH BC / POP BC -> remove (no-op)
+            if curr == "PUSH\tBC" and next1 == "POP\tBC":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: PUSH AF / POP AF -> remove (no-op, but flags change - be careful)
+            # Skip - flags might matter
+
+            # Pattern: EX DE,HL / EX DE,HL -> remove (no-op, swaps twice = original)
+            if curr == "EX\tDE,HL" and next1 == "EX\tDE,HL":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LD HL,x / LD HL,y -> LD HL,y (first load is dead)
+            if curr.startswith("LD\tHL,") and next1.startswith("LD\tHL,"):
+                # Skip the first LD HL
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: LD DE,x / LD DE,y -> LD DE,y (first load is dead)
+            if curr.startswith("LD\tDE,") and next1.startswith("LD\tDE,"):
+                i += 1
+                optimizations += 1
+                continue
+
+            # Pattern: LD A,x / LD A,y -> LD A,y (first load is dead)
+            if curr.startswith("LD\tA,") and next1.startswith("LD\tA,"):
+                i += 1
+                optimizations += 1
+                continue
 
             # No optimization applied - keep the line
             result.append(lines[i])
