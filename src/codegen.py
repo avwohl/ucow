@@ -310,6 +310,35 @@ class CodeGenerator:
         """Get size of a type in bytes."""
         return self.checker.type_size(typ)
 
+    def _var_key(self, name: str, is_local: bool = None) -> str:
+        """Get the dictionary key for a variable.
+
+        Local variables are scoped to their subroutine to avoid name collisions
+        when different subroutines have local variables with the same name.
+        """
+        # If is_local is explicitly False, it's a global
+        if is_local is False:
+            return name
+        # If is_local is True or we're in a subroutine context, scope the name
+        if is_local or self.current_sub:
+            # Check if this is a global variable (already in variables as unscoped)
+            if name in self.variables and not is_local:
+                return name
+            # Local variable - scope to current subroutine
+            if self.current_sub:
+                return f"{self.current_sub}.{name}"
+        return name
+
+    def get_var(self, name: str) -> Optional[Variable]:
+        """Look up a variable, checking local scope first then global."""
+        # First try local scoped name
+        if self.current_sub:
+            local_key = f"{self.current_sub}.{name}"
+            if local_key in self.variables:
+                return self.variables[local_key]
+        # Fall back to global
+        return self.variables.get(name)
+
     def allocate_var(self, name: str, typ: CowType, is_local: bool = False) -> Variable:
         """Allocate storage for a variable.
 
@@ -323,6 +352,7 @@ class CodeGenerator:
         Non-concurrent subroutines share the same memory addresses.
         """
         size = self.type_size(typ)
+        var_key = self._var_key(name, is_local)
 
         if self.call_graph and is_local and self.current_sub:
             # Workspace optimization mode: allocate within subroutine's workspace
@@ -340,7 +370,7 @@ class CodeGenerator:
             var = Variable(name, typ, self.data_offset, size)
             self.data_offset += size
 
-        self.variables[name] = var
+        self.variables[var_key] = var
         return var
 
     def get_string_label(self, value: str) -> str:
@@ -351,10 +381,29 @@ class CodeGenerator:
         return self.string_literals[value]
 
     def mangle_name(self, name: str) -> str:
-        """Mangle a variable name to avoid conflicts with 8080 registers."""
-        # Prefix with v_ to avoid conflicts with register names (a,b,c,d,e,h,l,m)
-        # and reserved words
+        """Mangle a variable name to avoid conflicts with 8080 registers.
+
+        For local variables in subroutines, includes the subroutine name to avoid
+        collisions with variables of the same name in other subroutines.
+        """
+        # Check if this is a local variable (exists in scoped form)
+        if self.current_sub:
+            local_key = f"{self.current_sub}.{name}"
+            if local_key in self.variables:
+                # Use subroutine-scoped name for local variable
+                return f"v_{self.current_sub}_{name}"
+        # Global variable or not found - use simple name
         return f"v_{name}"
+
+    def mangle_var_key(self, var_key: str) -> str:
+        """Mangle a variable dictionary key to a label.
+
+        The key is either "name" for globals or "sub.name" for locals.
+        """
+        if '.' in var_key:
+            sub, name = var_key.split('.', 1)
+            return f"v_{sub}_{name}"
+        return f"v_{var_key}"
 
     def eval_const_expr(self, expr) -> Optional[int]:
         """Try to evaluate an expression as a compile-time constant.
@@ -428,7 +477,7 @@ class CodeGenerator:
                 self.emit("\tLD\tHL,0")
 
         elif isinstance(expr, ast.Identifier):
-            var = self.variables.get(expr.name)
+            var = self.get_var(expr.name)
             if var:
                 mangled = self.mangle_name(expr.name)
                 if var.size == 1:
@@ -527,8 +576,25 @@ class CodeGenerator:
 
         elif isinstance(expr, ast.Cast):
             # Generate the inner expression
-            self.gen_expr(expr.expr, target)
-            # Type conversion handled by size
+            src_type = expr.expr.resolved_type
+            dst_type = expr.resolved_type
+            src_size = self.type_size(src_type) if src_type else 2
+            dst_size = self.type_size(dst_type) if dst_type else 2
+
+            # Check if this is a sign-extending cast (signed 8-bit to 16-bit)
+            src_signed = isinstance(src_type, IntType) and src_type.signed
+            dst_signed = isinstance(dst_type, IntType) and dst_type.signed
+
+            if src_size == 1 and dst_size == 2 and src_signed and dst_signed and target == 'HL':
+                # Sign-extend int8 to int16
+                self.gen_expr(expr.expr, 'A')
+                self.emit("\tLD\tL,A")
+                self.emit("\tRLCA")           # Rotate sign bit into carry
+                self.emit("\tSBC\tA,A")       # A = 0xFF if carry, 0x00 if not
+                self.emit("\tLD\tH,A")        # H = sign extension
+            else:
+                # Normal cast - just generate the inner expression
+                self.gen_expr(expr.expr, target)
 
         elif isinstance(expr, ast.ArrayAccess):
             self.gen_array_access(expr, target)
@@ -554,9 +620,12 @@ class CodeGenerator:
         elif isinstance(expr, ast.AddressOf):
             # Get address of operand
             if isinstance(expr.operand, ast.Identifier):
-                var = self.variables.get(expr.operand.name)
+                var = self.get_var(expr.operand.name)
                 if var:
                     self.emit(f"\tLD\tHL,{self.mangle_name(expr.operand.name)}")
+                else:
+                    # External or unresolved - use bare name
+                    self.emit(f"\tLD\tHL,{expr.operand.name}")
             elif isinstance(expr.operand, ast.FieldAccess):
                 self.gen_field_address(expr.operand)
             elif isinstance(expr.operand, ast.ArrayAccess):
@@ -566,14 +635,16 @@ class CodeGenerator:
             self.gen_call(expr, target)
 
         elif isinstance(expr, ast.SizeOf):
-            # Return array size
+            # Return array size in BYTES (element count * element size)
             if isinstance(expr.target, ast.Expression):
                 typ = expr.target.resolved_type
                 if isinstance(typ, ArrayType):
+                    elem_size = self.type_size(typ.element)
+                    byte_size = typ.size * elem_size
                     if target == 'A':
-                        self.emit(f"\tLD\tA,{typ.size & 0xFF}")
+                        self.emit(f"\tLD\tA,{byte_size & 0xFF}")
                     else:
-                        self.emit(f"\tLD\tHL,{typ.size}")
+                        self.emit(f"\tLD\tHL,{byte_size}")
 
         elif isinstance(expr, ast.BytesOf):
             # Return size in bytes
@@ -896,9 +967,14 @@ class CodeGenerator:
 
         # Get base address
         if isinstance(expr.array, ast.Identifier):
-            var = self.variables.get(expr.array.name)
+            var = self.get_var(expr.array.name)
             if var:
-                self.emit(f"\tLD\tHL,{self.mangle_name(expr.array.name)}")
+                if isinstance(array_type, PtrType):
+                    # For pointers, load the value (the address it points to)
+                    self.emit(f"\tLD\tHL,({self.mangle_name(expr.array.name)})")
+                else:
+                    # For arrays, use the address of the variable itself
+                    self.emit(f"\tLD\tHL,{self.mangle_name(expr.array.name)}")
             else:
                 self.emit(f"\tLD\tHL,{expr.array.name}")
         else:
@@ -935,11 +1011,14 @@ class CodeGenerator:
             record_type = record_type.target
         else:
             if isinstance(expr.record, ast.Identifier):
-                var = self.variables.get(expr.record.name)
+                var = self.get_var(expr.record.name)
                 if var:
                     self.emit(f"\tLD\tHL,{self.mangle_name(expr.record.name)}")
                 else:
                     self.emit(f"\tLD\tHL,{expr.record.name}")
+            elif isinstance(expr.record, ast.FieldAccess):
+                # Nested field access - compute address of the containing field
+                self.gen_field_address(expr.record)
             else:
                 self.gen_expr(expr.record, 'HL')
 
@@ -971,10 +1050,26 @@ class CodeGenerator:
                     self.generating_inline = False
                     return
 
-        # Push arguments in reverse order
-        for arg in reversed(expr.args):
-            self.gen_expr(arg, 'HL')
-            self.emit("\tPUSH\tHL")
+        # Determine calling convention:
+        # - 0 args: no argument passing needed
+        # - 1 arg that fits in HL (<=2 bytes): pass in HL (register calling convention)
+        # - Multiple args or >2 byte arg: push on stack (stack calling convention)
+        use_register_call = False
+        if len(expr.args) == 1:
+            arg = expr.args[0]
+            arg_type = arg.resolved_type if hasattr(arg, 'resolved_type') else None
+            arg_size = self.type_size(arg_type) if arg_type else 2
+            if arg_size <= 2:
+                use_register_call = True
+
+        if use_register_call:
+            # Single argument: pass in HL, no push/pop needed
+            self.gen_expr(expr.args[0], 'HL')
+        else:
+            # Push arguments in reverse order (stack calling convention)
+            for arg in reversed(expr.args):
+                self.gen_expr(arg, 'HL')
+                self.emit("\tPUSH\tHL")
 
         # Call
         if isinstance(expr.target, ast.Identifier):
@@ -991,7 +1086,7 @@ class CodeGenerator:
             else:
                 # Indirect call through interface variable
                 # Load address and use _callhl helper
-                var = self.variables.get(name)
+                var = self.get_var(name)
                 if var:
                     self.emit(f"\tLD\tHL,({self.mangle_name(name)})")
                 else:
@@ -1002,8 +1097,8 @@ class CodeGenerator:
             # Call address in HL - use helper
             self.emit("\tCALL\t_callhl")
 
-        # Clean up arguments from stack
-        if expr.args:
+        # Clean up arguments from stack (only for stack calling convention)
+        if not use_register_call and expr.args:
             stack_bytes = len(expr.args) * 2
             if stack_bytes == 2:
                 self.emit("\tPOP\tDE")  # Discard
@@ -1100,7 +1195,7 @@ class CodeGenerator:
             var_type = UINT16
 
         # Check if already allocated (for global vars)
-        var = self.variables.get(stmt.name)
+        var = self.get_var(stmt.name)
         is_preallocated = var is not None
         if not var:
             # Variables declared inside a subroutine are locals
@@ -1164,7 +1259,7 @@ class CodeGenerator:
         """Generate assignment statement."""
         # Optimize byte variable increment/decrement: var := var + 1 -> INR M
         if isinstance(stmt.target, ast.Identifier):
-            var = self.variables.get(stmt.target.name)
+            var = self.get_var(stmt.target.name)
             if var and var.size == 1:
                 # Check for var := var + 1 or var := var - 1
                 if isinstance(stmt.value, ast.BinaryOp):
@@ -1204,7 +1299,7 @@ class CodeGenerator:
 
         # Store to target
         if isinstance(stmt.target, ast.Identifier):
-            var = self.variables.get(stmt.target.name)
+            var = self.get_var(stmt.target.name)
             if var:
                 mangled = self.mangle_name(stmt.target.name)
                 if var.size == 1:
@@ -1278,7 +1373,7 @@ class CodeGenerator:
                 self.emit("\tPOP\tHL")
 
             if isinstance(target, ast.Identifier):
-                var = self.variables.get(target.name)
+                var = self.get_var(target.name)
                 mangled = self.mangle_name(target.name)
                 if var and var.size == 1:
                     self.emit("\tLD\tA,L")
@@ -1655,7 +1750,7 @@ class CodeGenerator:
         else:
             self.emit_label(mangled_name)
 
-        # Allocate local variables (parameters are passed on stack)
+        # Allocate local variables for parameters and return values
         # These are locals, so they can share space with non-concurrent subs
         for param_name, param_type in params:
             self.allocate_var(param_name, param_type, is_local=True)
@@ -1663,25 +1758,47 @@ class CodeGenerator:
         for ret_name, ret_type in returns:
             self.allocate_var(ret_name, ret_type, is_local=True)
 
-        # Copy parameters from stack to variables
-        # Args are pushed in reverse order at call site, so first param is at lowest offset
-        offset = 2  # Return address
-        for param_name, param_type in params:
-            var = self.variables.get(param_name)
+        # Determine if we use register calling convention:
+        # - 1 param that fits in HL: passed in HL
+        # - Otherwise: passed on stack
+        use_register_call = False
+        if len(params) == 1:
+            param_name, param_type = params[0]
+            param_size = self.type_size(param_type) if param_type else 2
+            if param_size <= 2:
+                use_register_call = True
+
+        if use_register_call:
+            # Single argument passed in HL - copy to local variable
+            param_name, param_type = params[0]
+            var = self.get_var(param_name)
             if var:
                 mangled = self.mangle_name(param_name)
-                self.emit(f"\tLD\tHL,{offset}")
-                self.emit("\tADD\tHL,SP")
                 if var.size == 1:
-                    self.emit("\tLD\tA,(HL)")
+                    self.emit("\tLD\tA,L")
                     self.emit(f"\tLD\t({mangled}),A")
                 else:
-                    self.emit("\tLD\tE,(HL)")
-                    self.emit("\tINC\tHL")
-                    self.emit("\tLD\tD,(HL)")
-                    self.emit("\tEX\tDE,HL")
                     self.emit(f"\tLD\t({mangled}),HL")
-                offset += 2
+        else:
+            # Copy parameters from stack to variables
+            # Args are pushed in reverse order at call site, so first param is at lowest offset
+            offset = 2  # Return address
+            for param_name, param_type in params:
+                var = self.get_var(param_name)
+                if var:
+                    mangled = self.mangle_name(param_name)
+                    self.emit(f"\tLD\tHL,{offset}")
+                    self.emit("\tADD\tHL,SP")
+                    if var.size == 1:
+                        self.emit("\tLD\tA,(HL)")
+                        self.emit(f"\tLD\t({mangled}),A")
+                    else:
+                        self.emit("\tLD\tE,(HL)")
+                        self.emit("\tINC\tHL")
+                        self.emit("\tLD\tD,(HL)")
+                        self.emit("\tEX\tDE,HL")
+                        self.emit(f"\tLD\t({mangled}),HL")
+                    offset += 2
 
         # Body
         for stmt in decl.body:
@@ -1690,7 +1807,7 @@ class CodeGenerator:
         # Return (with first return value in HL)
         if returns:
             ret_var = returns[0][0]  # (name, type) tuple
-            var = self.variables.get(ret_var)
+            var = self.get_var(ret_var)
             mangled_ret = self.mangle_name(ret_var)
             if var and var.size == 1:
                 self.emit(f"\tLD\tA,({mangled_ret})")
@@ -1818,8 +1935,8 @@ class CodeGenerator:
 
             # Compute total workspace size
             max_offset = 0
-            for name, var in self.variables.items():
-                if name not in self.array_initializers:
+            for var_key, var in self.variables.items():
+                if var_key not in self.array_initializers and var.name not in self.array_initializers:
                     end = var.offset + var.size
                     if end > max_offset:
                         max_offset = end
@@ -1830,14 +1947,14 @@ class CodeGenerator:
 
             # Emit EQU directives for each variable
             self.emit("; Variable addresses (workspace-optimized)")
-            for name, var in self.variables.items():
-                if name not in self.array_initializers:
-                    self.emit(f"{self.mangle_name(name)}\tEQU\t_wsbase+{var.offset}")
+            for var_key, var in self.variables.items():
+                if var_key not in self.array_initializers and var.name not in self.array_initializers:
+                    self.emit(f"{self.mangle_var_key(var_key)}\tEQU\t_wsbase+{var.offset}")
         else:
             # Standard mode: each variable has its own allocation
-            for name, var in self.variables.items():
-                if name not in self.array_initializers:
-                    self.emit(f"{self.mangle_name(name)}:\tDS\t{var.size}")
+            for var_key, var in self.variables.items():
+                if var_key not in self.array_initializers and var.name not in self.array_initializers:
+                    self.emit(f"{self.mangle_var_key(var_key)}:\tDS\t{var.size}")
 
         self.emit("")
         self.emit("\tEND")
@@ -2416,6 +2533,175 @@ class CodeGenerator:
                 i += 1
                 optimizations += 1
                 continue
+
+            # Pattern: LD HL,const / LD A,L / LD (x),A -> LD A,const / LD (x),A (for small constants)
+            # This is very common for 8-bit variable initialization from constants
+            if curr.startswith("LD\tHL,") and next1 == "LD\tA,L":
+                try:
+                    const_str = curr[6:]
+                    const = int(const_str)
+                    if 0 <= const <= 255:
+                        if next2.startswith("LD\t(") and next2.endswith("),A"):
+                            result.append(f"\tLD\tA,{const}")
+                            result.append(lines[i + 2])  # Keep original with tab
+                            i += 3
+                            optimizations += 1
+                            continue
+                except ValueError:
+                    pass
+
+            # Pattern: LD HL,0 / LD A,L -> XOR A (0 to A is common)
+            if curr == "LD\tHL,0" and next1 == "LD\tA,L":
+                # Only if next instruction doesn't need H
+                if not next2.startswith("LD\tA,H") and next2 != "LD\tH,0":
+                    result.append("\tXOR\tA")
+                    i += 2
+                    optimizations += 1
+                    continue
+
+            # Pattern: LD HL,const / LD A,L / LD H,0 -> LD A,const / LD L,A / LD H,0 (saves LD HL)
+            # Actually better: skip H,0 setup if we then do something else with HL
+            # For now, just the basic pattern
+
+            # Pattern: PUSH HL / CALL print / POP DE -> CALL print / EX DE,HL (if HL has return)
+            # Hmm, print doesn't return in HL, so this is for stack cleanup
+
+            # Pattern: PUSH AF / LD A,(x) / LD E,A / POP AF -> LD A,(x) / LD E,A / PUSH AF...
+            # This is tricky due to flag dependencies
+
+            # Pattern: LD A,L / LD L,A / LD H,0 -> keep just LD L,A / LD H,0 if we need HL extension
+            # No wait, that changes semantics - A needs the value. Keep as-is.
+
+            # Pattern: LD A,(x) / PUSH AF / LD A,(y) / LD E,A / POP AF ->
+            #          LD A,(y) / LD E,A / LD A,(x)  (avoid push/pop for 8-bit ops)
+            if curr.startswith("LD\tA,(") and next1 == "PUSH\tAF":
+                if next2.startswith("LD\tA,(") and next3 == "LD\tE,A":
+                    next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
+                    if next4 == "POP\tAF":
+                        var_x = curr[5:]  # "(xxx)" from "LD\tA,(xxx)" - skip "LD\tA,"
+                        var_y = next2[5:]  # "(yyy)" from "LD\tA,(yyy)"
+                        result.append(f"\tLD\tA,{var_y}")
+                        result.append("\tLD\tE,A")
+                        result.append(f"\tLD\tA,{var_x}")
+                        i += 5
+                        optimizations += 1
+                        continue
+
+            # Pattern: LD L,A / LD H,0 / PUSH HL -> LD L,A / LD H,0 / PUSH HL (keep, but check for...)
+            # Pattern: LD L,A / LD H,0 / PUSH HL / CALL x / POP DE - the common print pattern
+
+            # Pattern: ADD A,const / LD L,A / LD H,0 when we only need 8-bit result
+            # Not safe without knowing context
+
+            # Pattern: LD HL,const / ADD HL,DE -> can sometimes be LXI D,const / DAD D or EX/DAD/EX
+            # Complex, skip
+
+            # Pattern: consecutive LD (x),HL / LD HL,(y) / LD (x),HL - redundant middle store
+            # Only if y != x - need tracking
+
+            # Pattern: JP z,target / JP target2 / target: -> JP nz,target2 / target:
+            # Jump threading - complex, needs label tracking
+
+            # Pattern: LD A,H / OR L / JP Z,x vs LD A,H / OR L / JP NZ,x
+            # No optimization, just noting this is common for HL==0 check
+
+            # Pattern: LD HL,(x) / EX DE,HL / LD HL,(x) -> LD HL,(x) / LD D,H / LD E,L
+            # Same variable loaded twice - use register copy instead of memory access
+            if curr.startswith("LD\tHL,(") and next1 == "EX\tDE,HL":
+                var = curr[7:-1]  # Extract x from "LD\tHL,(x)" - skip "LD\tHL,(" and trailing ")"
+                if next2 == f"LD\tHL,({var})":
+                    result.append(lines[i])
+                    result.append("\tLD\tD,H")
+                    result.append("\tLD\tE,L")
+                    i += 3
+                    optimizations += 1
+                    continue
+
+            # Pattern: LD A,x / LD x,A -> remove second (x is already x)
+            # This is like LD A,B / LD B,A - second is redundant if no intervening ops
+            if curr.startswith("LD\tA,") and not curr.startswith("LD\tA,("):
+                reg = curr[5:]
+                if next1 == f"LD\t{reg},A":
+                    result.append(lines[i])
+                    i += 2
+                    optimizations += 1
+                    continue
+
+            # Pattern: LD DE,const / ADD HL,DE for small constants
+            # Already have LD DE,1-3 / ADD HL,DE -> INC HL patterns above
+
+            # Pattern: Multiple POP DE after calls when DE not used
+            # Can't optimize without liveness analysis
+
+            # Pattern: LD HL,label / PUSH HL / CALL x -> CALL x with inline push
+            # Not directly applicable in Z80
+
+            # Pattern: JP cond,L1 / JP L2 / L1: ... when L1 is immediately after
+            # This is handled by the "JP to next instruction" pattern
+
+            # Pattern: LD A,0 / OR A -> XOR A (sets zero flag, clears A)
+            if curr == "LD\tA,0" and next1 == "OR\tA":
+                result.append("\tXOR\tA")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: LD A,(x) / OR A / JP Z,y -> LD A,(x) / AND A / JP Z,y
+            # Same thing, but AND A is what we already emit. No change needed.
+
+            # Pattern: XOR A / LD H,A -> LD H,0 (uses result of XOR A)
+            if curr == "XOR\tA" and next1 == "LD\tH,A":
+                result.append("\tLD\tH,0")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: XOR A / LD L,A -> LD L,0 (uses result of XOR A)
+            if curr == "XOR\tA" and next1 == "LD\tL,A":
+                result.append("\tLD\tL,0")
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: XOR A / LD (x),A -> LD A,0 / LD (x),A (same bytes, but clearer)
+            # Actually XOR A is 1 byte, LD A,0 is 2 bytes. Keep XOR A.
+
+            # Pattern: LD HL,const / LD DE,HL -> LD DE,const (direct load)
+            # Wait, LD DE,HL isn't a valid Z80 instruction. Skip.
+
+            # Pattern: LD A,const / ADD A,B vs LD A,B / ADD A,const
+            # Depends on which constant is smaller
+
+            # Pattern: INC A / DEC A -> remove both
+            if curr == "INC\tA" and next1 == "DEC\tA":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: DEC A / INC A -> remove both
+            if curr == "DEC\tA" and next1 == "INC\tA":
+                i += 2
+                optimizations += 1
+                continue
+
+            # Pattern: INC HL / INC HL / INC HL / INC HL -> LD DE,4 / ADD HL,DE (for 4+ increments)
+            # Actually INC HL is 1 byte, LD DE,4 is 3 bytes, ADD HL,DE is 1 byte = 4 bytes
+            # 4 INC HL = 4 bytes, so break-even at 4. Worth it at 5+.
+            if curr == "INC\tHL" and next1 == "INC\tHL" and next2 == "INC\tHL" and next3 == "INC\tHL":
+                next4 = lines[i + 4].strip() if i + 4 < len(lines) else ""
+                if next4 == "INC\tHL":
+                    # Count total consecutive INC HL
+                    count = 4
+                    j = i + 4
+                    while j < len(lines) and lines[j].strip() == "INC\tHL":
+                        count += 1
+                        j += 1
+                    if count >= 5:
+                        result.append(f"\tLD\tDE,{count}")
+                        result.append("\tADD\tHL,DE")
+                        i = j
+                        optimizations += 1
+                        continue
 
             # No optimization applied - keep the line
             result.append(lines[i])

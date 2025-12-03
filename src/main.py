@@ -13,12 +13,14 @@ from .types import TypeChecker, TypeError
 from .codegen import generate, CodeGenerator
 from .optimizer import optimize_program
 from .callgraph import CallGraph, CallGraphBuilder, build_call_graph
+from .postopt import optimize_asm
 from . import ast
 
 
 def compile_file(input_path: str, output_path: str = None,
                  include_paths: list = None, optimize: bool = True,
-                 opt_debug: bool = False, library_mode: bool = False) -> bool:
+                 opt_debug: bool = False, library_mode: bool = False,
+                 post_optimize: bool = True) -> bool:
     """Compile a Cowgol source file to 8080 assembly.
 
     Args:
@@ -55,6 +57,12 @@ def compile_file(input_path: str, output_path: str = None,
 
         # Generate code
         asm = generate(program, checker, library_mode=library_mode)
+
+        # Post-assembly optimization (JP->JR, dead code elimination)
+        if post_optimize:
+            asm, savings = optimize_asm(asm, verbose=opt_debug)
+            if opt_debug and savings > 0:
+                print(f"Post-optimizer: {savings} bytes saved")
 
         # Write output
         output_path.write_text(asm)
@@ -351,6 +359,11 @@ def main():
         action='store_true',
         help="Enable workspace optimization (automatic with multiple files)"
     )
+    parser.add_argument(
+        '--no-post-opt',
+        action='store_true',
+        help="Disable post-assembly optimization (JP->JR conversion, dead code elimination)"
+    )
 
     args = parser.parse_args()
 
@@ -395,7 +408,8 @@ def main():
             input_files[0], args.output, args.include,
             optimize=not args.no_optimize,
             opt_debug=args.opt_debug,
-            library_mode=args.library
+            library_mode=args.library,
+            post_optimize=not args.no_post_opt
         )
     return 0 if success else 1
 

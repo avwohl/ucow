@@ -785,6 +785,185 @@ sub test_edge_cases() is
 end sub;
 
 # ==================================================================
+# TYPEDEF TESTS
+# ==================================================================
+
+typedef Byte is uint8;
+typedef Word is uint16;
+typedef BytePtr is [uint8];
+
+sub test_typedef() is
+    var b: Byte;
+    var w: Word;
+    var arr: Byte[5];
+
+    # Basic typedef usage
+    b := 42;
+    print("tdef1 ");
+    print_i16(b as uint16);  # 42
+    print_nl();
+
+    w := 1000;
+    print("tdef2 ");
+    print_i16(w);  # 1000
+    print_nl();
+
+    # Typedef in array
+    arr[0] := 10;
+    arr[1] := 20;
+    print("tdef3 ");
+    print_i16((arr[0] + arr[1]) as uint16);  # 30
+    print_nl();
+end sub;
+
+# ==================================================================
+# @BYTESOF TESTS
+# ==================================================================
+
+sub test_bytesof() is
+    var b: uint8;
+    var w: uint16;
+    var arr: uint16[5];
+    var p: Point;
+
+    # @bytesof on variables
+    print("bof1 ");
+    print_i16(@bytesof b);  # 1
+    print_nl();
+
+    print("bof2 ");
+    print_i16(@bytesof w);  # 2
+    print_nl();
+
+    # @bytesof on array (total size)
+    print("bof3 ");
+    print_i16(@bytesof arr);  # 10 (5 * 2)
+    print_nl();
+
+    # @bytesof on record
+    print("bof4 ");
+    print_i16(@bytesof p);  # 4 (2 + 2)
+    print_nl();
+end sub;
+
+# ==================================================================
+# @NEXT / @PREV TESTS
+# ==================================================================
+
+sub test_next_prev() is
+    var arr: uint16[5];
+    var p: [uint16];
+
+    arr[0] := 100;
+    arr[1] := 200;
+    arr[2] := 300;
+    arr[3] := 400;
+    arr[4] := 500;
+
+    # @next moves pointer forward
+    p := &arr[0];
+    print("next1 ");
+    print_i16(p[0]);  # 100
+    print_nl();
+
+    p := @next p;
+    print("next2 ");
+    print_i16(p[0]);  # 200
+    print_nl();
+
+    p := @next p;
+    print("next3 ");
+    print_i16(p[0]);  # 300
+    print_nl();
+
+    # @prev moves pointer backward
+    p := @prev p;
+    print("prev1 ");
+    print_i16(p[0]);  # 200
+    print_nl();
+
+    p := @prev p;
+    print("prev2 ");
+    print_i16(p[0]);  # 100
+    print_nl();
+end sub;
+
+# ==================================================================
+# SIGNED INTEGER TESTS
+# ==================================================================
+
+sub test_signed() is
+    var i8: int8;
+    var i16: int16;
+    var u8: uint8;
+    var u16: uint16;
+
+    # Negative values
+    i8 := -10;
+    print("sign1 ");
+    print_i16(i8 as int16);  # -10 (65526 as uint16)
+    print_nl();
+
+    i16 := -1000;
+    print("sign2 ");
+    print_i16(i16 as uint16);  # 64536
+    print_nl();
+
+    # Signed arithmetic
+    i16 := -50;
+    i16 := i16 + 30;
+    print("sign3 ");
+    print_i16(i16 as uint16);  # 65516 (-20)
+    print_nl();
+
+    # Sign extension from int8 to int16
+    i8 := -5;
+    i16 := i8 as int16;
+    print("sign4 ");
+    print_i16(i16 as uint16);  # 65531 (-5)
+    print_nl();
+
+    # Positive int8 to int16 (no sign extension needed)
+    i8 := 100;
+    i16 := i8 as int16;
+    print("sign5 ");
+    print_i16(i16 as uint16);  # 100
+    print_nl();
+end sub;
+
+# ==================================================================
+# INTERFACE TESTS
+# ==================================================================
+
+interface BinaryOp(a: uint16, b: uint16): (r: uint16);
+
+sub add_op implements BinaryOp is
+    r := a + b;
+end sub;
+
+sub mul_op implements BinaryOp is
+    r := a * b;
+end sub;
+
+sub test_interface() is
+    var op: BinaryOp;
+    var result: uint16;
+
+    # Direct call through interface variable
+    op := add_op;
+    result := op(10, 20);
+    print("intf1 ");
+    print_i16(result);  # 30
+    print_nl();
+
+    op := mul_op;
+    result := op(6, 7);
+    print("intf2 ");
+    print_i16(result);  # 42
+    print_nl();
+end sub;
+
+# ==================================================================
 # MAIN TEST RUNNER
 # ==================================================================
 
@@ -806,5 +985,10 @@ test_initialization();
 test_casts();
 test_constants();
 test_edge_cases();
+test_typedef();
+test_bytesof();
+test_next_prev();
+test_signed();
+test_interface();
 
 print("\r\nTests complete.\r\n");

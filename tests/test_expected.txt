@@ -84,5 +84,24 @@ edge4 0
 edge5 255
 edge6 0
 edge7 5
+tdef1 42
+tdef2 1000
+tdef3 30
+bof1 1
+bof2 2
+bof3 10
+bof4 4
+next1 100
+next2 200
+next3 300
+prev1 200
+prev2 100
+sign1 65526
+sign2 64536
+sign3 65516
+sign4 65531
+sign5 100
+intf1 30
+intf2 42
 
 Tests complete.

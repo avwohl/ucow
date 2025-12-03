@@ -14,54 +14,28 @@ PRTSTR  EQU     9
 ; ============================================================
 
 ; Print character in A
-; Bytes: ~20, Cycles: ~80 + BDOS
+; Caller-save convention: we can trash BC, DE, HL
+; Bytes: ~8
 print_char:
-        PUSH    BC
-        PUSH    DE
-        PUSH    HL
         LD      E,A
         LD      C,CONOUT
-        CALL    BDOS
-        POP     HL
-        POP     DE
-        POP     BC
-        RET
+        JP      BDOS            ; Tail call
 
-; Print string (argument on stack - pointer to null-terminated string)
-; Stack: [ret addr][string pointer]
-; Bytes: ~25, Cycles: varies
+; Print string (argument in HL - pointer to null-terminated string)
+; Caller-save: we trash BC, DE but need HL for the loop
+; Bytes: ~15, Cycles: varies
 print:
-        PUSH    BC
-        PUSH    DE
-        PUSH    HL
-        ; Get string pointer from stack (SP+8 = argument)
-        LD      HL,8
-        ADD     HL,SP
-        LD      E,(HL)
-        INC     HL
-        LD      D,(HL)
-        EX      DE,HL           ; HL = string pointer
-        JR      _prlp           ; Share loop with internal version
-
-; Internal print - string pointer in HL (for use by runtime routines)
 _print_hl:
-        PUSH    BC
-        PUSH    DE
-        PUSH    HL
 _prlp:  LD      A,(HL)
-        OR      A               ; Test for zero (1/4) - faster than CP 0 (2/7)
-        JR      Z,_prdn         ; Use JR for short branch (2/12 vs JP 3/10) - saves 1 byte
-        PUSH    HL
+        OR      A               ; Test for zero
+        RET     Z               ; Done if null terminator
+        PUSH    HL              ; Save string pointer (BDOS trashes it)
         LD      E,A
         LD      C,CONOUT
         CALL    BDOS
-        POP     HL
-        INC     HL              ; (1/6)
-        JR      _prlp           ; Short backward branch (2/12)
-_prdn:  POP     HL
-        POP     DE
-        POP     BC
-        RET
+        POP     HL              ; Restore string pointer
+        INC     HL
+        JR      _prlp
 
 ; Print newline
 ; Bytes: 9
@@ -71,32 +45,16 @@ print_nl:
         LD      A,10
         JP      print_char      ; Tail call saves RET (3/10 vs CALL+RET)
 
-; Print 8-bit unsigned (argument on stack as 16-bit)
-; Stack: [ret addr][value as 16-bit]
-; Bytes: ~15
+; Print 8-bit unsigned (argument in L, or HL with H=0)
 print_i8:
-        ; Fall through to print_i16 since value is already 16-bit on stack
+        ; Fall through to print_i16 since value is in HL
 
-; Print 16-bit unsigned (argument on stack)
-; Stack: [ret addr][value]
-; Bytes: ~80, Cycles: varies with value
+; Print 16-bit unsigned (argument in HL)
+; Caller-save: we trash all registers
+; Bytes: ~50, Cycles: varies with value
 print_i16:
-        PUSH    BC
-        PUSH    DE
-        PUSH    HL
-
-        ; Get argument from stack: SP+8 = value
-        ; Stack after pushes: SP -> [HL][DE][BC][ret][arg]
-        ;                          +0  +2  +4  +6   +8
-        LD      HL,8            ; Offset to argument
-        ADD     HL,SP
-        LD      E,(HL)
-        INC     HL
-        LD      D,(HL)
-        EX      DE,HL           ; HL = argument value
-
         ; Convert to decimal string
-        ; Use C as buffer index (0-5), B is temp
+        ; Use C as buffer index (0-5)
         LD      C,5             ; Start at end of buffer
 
         ; Store null terminator
@@ -133,42 +91,22 @@ _p16lp: ; Divide HL by 10
         LD      HL,_numbuf
         LD      B,0
         ADD     HL,BC
-        CALL    _print_hl       ; Internal call, string in HL
-
-        POP     HL
-        POP     DE
-        POP     BC
-        RET
+        JP      _print_hl       ; Tail call, string in HL
 
 _numbuf: DS     6               ; Buffer for number conversion
 
-; Print 16-bit unsigned in hex (argument on stack)
-; Stack: [ret addr][value]
-; Bytes: ~40
+; Print 16-bit unsigned in hex (argument in HL)
+; Caller-save: we trash all registers
+; Bytes: ~15
 print_hex_i16:
-        PUSH    BC
-        PUSH    DE
-        PUSH    HL
-
-        ; Get argument from stack: SP+8 = value
-        LD      HL,8
-        ADD     HL,SP
-        LD      E,(HL)
-        INC     HL
-        LD      D,(HL)
-        EX      DE,HL           ; HL = value
-
         ; Print high byte first
         LD      A,H
+        PUSH    HL              ; Save L for later
         CALL    _prhex2
+        POP     HL
         ; Then low byte
         LD      A,L
-        CALL    _prhex2
-
-        POP     HL
-        POP     DE
-        POP     BC
-        RET
+        JP      _prhex2         ; Tail call
 
 ; Print 2 hex digits from A
 _prhex2:

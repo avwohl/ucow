@@ -609,6 +609,9 @@ class TypeChecker:
 
         elif isinstance(expr, ast.BytesOf):
             # Returns size in bytes
+            # Need to resolve the target's type to compute its size
+            if isinstance(expr.target, ast.Expression):
+                self.check_expr(expr.target)
             expr.resolved_type = INTPTR
             return INTPTR
 
