@@ -730,6 +730,44 @@ def print_a_combining_pass(lines: list[str], verbose: bool = False) -> tuple[lis
     return result, total_savings
 
 
+def print_de_combining_pass(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
+    """
+    Combine EX DE,HL / CALL print_i16_nl into CALL print_de_nl
+
+    This saves 2 bytes per occurrence (4 bytes -> 3 bytes).
+    """
+    result = []
+    total_savings = 0
+    i = 0
+
+    while i < len(lines):
+        # Check for EX DE,HL / CALL print_i16_nl
+        if (i + 1 < len(lines) and
+            lines[i].strip() in ('EX\tDE,HL', 'EX DE,HL') and
+            lines[i+1].strip() == 'CALL\tprint_i16_nl'):
+            result.append('\tCALL\tprint_de_nl\n')
+            total_savings += 1  # 4 bytes -> 3 bytes (EX=1, CALL=3 -> CALL=3)
+            i += 2
+            continue
+
+        # Check for EX DE,HL / JP print_i16_nl (tail calls)
+        if (i + 1 < len(lines) and
+            lines[i].strip() in ('EX\tDE,HL', 'EX DE,HL') and
+            lines[i+1].strip() == 'JP\tprint_i16_nl'):
+            result.append('\tJP\tprint_de_nl\n')
+            total_savings += 1  # 4 bytes -> 3 bytes
+            i += 2
+            continue
+
+        result.append(lines[i])
+        i += 1
+
+    if verbose and total_savings > 0:
+        print(f"  Print DE combining: {total_savings} bytes saved")
+
+    return result, total_savings
+
+
 def address_folding_pass(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
     """
     Fold address calculations: LD HL,addr / INC HL / INC HL -> LD HL,addr+2
@@ -1049,6 +1087,10 @@ def optimize_asm(asm_code: str, verbose: bool = False) -> tuple[str, int]:
 
     # Pass 9: Combine LD L,A / LD H,0 / CALL print_i16_nl into CALL print_a_nl
     lines, savings = print_a_combining_pass(lines, verbose)
+    total_savings += savings
+
+    # Pass 10: Combine EX DE,HL / CALL print_i16_nl into CALL print_de_nl
+    lines, savings = print_de_combining_pass(lines, verbose)
     total_savings += savings
 
     return ''.join(lines), total_savings
