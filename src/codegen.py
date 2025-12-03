@@ -688,6 +688,39 @@ class CodeGenerator:
         else:
             self.emit(f"\t; TODO: {type(expr).__name__}")
 
+    def is_simple_expr(self, expr: ast.Expression) -> bool:
+        """Check if expression can be loaded into DE without using HL.
+
+        Simple expressions are:
+        - Number literals (LD DE,nn is 3 bytes, saves 1 byte vs LD HL,nn/EX)
+        - String literals (address)
+        - Constants
+
+        Note: Variable loads via LD DE,(var) are 4 bytes (ED prefix), same as
+        LD HL,(var)/EX DE,HL, so no savings. Only optimize for constants.
+        """
+        if isinstance(expr, (ast.NumberLiteral, ast.StringLiteral, ast.NilLiteral)):
+            return True
+        if isinstance(expr, ast.Identifier):
+            # Check if it's a constant
+            if expr.name in self.checker.constants:
+                return True
+        return False
+
+    def gen_expr_to_de(self, expr: ast.Expression) -> None:
+        """Generate code to load a simple expression directly into DE."""
+        if isinstance(expr, ast.NumberLiteral):
+            self.emit(f"\tLD\tDE,{expr.value & 0xFFFF}")
+        elif isinstance(expr, ast.StringLiteral):
+            label = self.get_string_label(expr.value)
+            self.emit(f"\tLD\tDE,{label}")
+        elif isinstance(expr, ast.NilLiteral):
+            self.emit("\tLD\tDE,0")
+        elif isinstance(expr, ast.Identifier):
+            if expr.name in self.checker.constants:
+                value = self.checker.constants[expr.name]
+                self.emit(f"\tLD\tDE,{value & 0xFFFF}")
+
     def gen_binop(self, expr: ast.BinaryOp, target: str) -> None:
         """Generate binary operation."""
         op = expr.op
@@ -758,11 +791,18 @@ class CodeGenerator:
 
         else:
             # 16-bit operations
-            self.gen_expr(expr.left, 'HL')
-            self.emit("\tPUSH\tHL")
-            self.gen_expr(expr.right, 'HL')
-            self.emit("\tEX\tDE,HL")  # DE = right
-            self.emit("\tPOP\tHL")  # HL = left
+            # Optimization: if right operand is simple, load it directly into DE
+            # This avoids PUSH/POP/EX overhead (saves 3 bytes per operation)
+            if self.is_simple_expr(expr.right):
+                self.gen_expr(expr.left, 'HL')
+                self.gen_expr_to_de(expr.right)
+            else:
+                # General case: need to preserve left while evaluating right
+                self.gen_expr(expr.left, 'HL')
+                self.emit("\tPUSH\tHL")
+                self.gen_expr(expr.right, 'HL')
+                self.emit("\tEX\tDE,HL")  # DE = right
+                self.emit("\tPOP\tHL")  # HL = left
 
             if op == '+':
                 self.emit("\tADD\tHL,DE")

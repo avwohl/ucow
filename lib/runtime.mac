@@ -45,6 +45,13 @@ print_nl:
         LD      A,10
         JP      print_char      ; Tail call saves RET (3/10 vs CALL+RET)
 
+; Print 16-bit unsigned followed by newline (argument in HL)
+; Saves 3 bytes per call vs CALL print_i16 / CALL print_nl
+; Bytes: 6
+print_i16_nl:
+        CALL    print_i16
+        JP      print_nl        ; JP to print_nl
+
 ; Print 8-bit unsigned (argument in L, or HL with H=0)
 print_i8:
         ; Fall through to print_i16 since value is in HL

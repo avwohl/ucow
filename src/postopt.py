@@ -647,6 +647,177 @@ def register_tracking_pass(lines: list[str], verbose: bool = False) -> tuple[lis
     return result, total_savings
 
 
+def print_combining_pass(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
+    """
+    Combine CALL print_i16 / CALL print_nl into CALL print_i16_nl
+
+    This saves 3 bytes per occurrence (6 bytes -> 3 bytes).
+    """
+    result = []
+    total_savings = 0
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Check for CALL print_i16 followed by CALL print_nl
+        if stripped == 'CALL\tprint_i16':
+            if i + 1 < len(lines):
+                next_stripped = lines[i + 1].strip()
+                if next_stripped == 'CALL\tprint_nl':
+                    result.append('\tCALL\tprint_i16_nl\n')
+                    total_savings += 3  # 6 bytes -> 3 bytes
+                    i += 2
+                    continue
+
+        # Also check for JP print_nl after CALL print_i16 (tail calls)
+        if stripped == 'CALL\tprint_i16':
+            if i + 1 < len(lines):
+                next_stripped = lines[i + 1].strip()
+                if next_stripped == 'JP\tprint_nl':
+                    result.append('\tJP\tprint_i16_nl\n')
+                    total_savings += 3  # 6 bytes -> 3 bytes
+                    i += 2
+                    continue
+
+        result.append(line)
+        i += 1
+
+    if verbose and total_savings > 0:
+        print(f"  Print combining: {total_savings} bytes saved")
+
+    return result, total_savings
+
+
+def address_folding_pass(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
+    """
+    Fold address calculations: LD HL,addr / INC HL / INC HL -> LD HL,addr+2
+
+    This is common for record field access.
+    """
+    result = []
+    total_savings = 0
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Look for LD HL,symbol (not LD HL,(symbol))
+        m = re.match(r'LD\s+HL,([A-Za-z_][A-Za-z0-9_]*)$', stripped)
+        if m:
+            addr = m.group(1)
+            # Count consecutive INC HL
+            inc_count = 0
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == 'INC\tHL':
+                inc_count += 1
+                j += 1
+
+            # If 2+ INC HL, fold into address
+            if inc_count >= 2:
+                result.append(f'\tLD\tHL,{addr}+{inc_count}\n')
+                # Each INC HL is 1 byte, LD HL,addr+n is same 3 bytes as LD HL,addr
+                # So we save inc_count bytes
+                total_savings += inc_count  # INC HL is 1 byte each
+                i = j
+                continue
+            elif inc_count == 1:
+                # Just 1 INC - not worth changing (LD HL,addr+1 is same size)
+                # But we still emit the original
+                pass
+
+        result.append(line)
+        i += 1
+
+    if verbose and total_savings > 0:
+        print(f"  Address folding: {total_savings} bytes saved")
+
+    return result, total_savings
+
+
+def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
+    """
+    Remove dead stores (stores to variables that are immediately overwritten).
+
+    Pattern: LD (var),r followed by LD (var),r without intervening read of var
+    """
+    result = []
+    total_savings = 0
+
+    # Track pending stores: var -> (line_index, size_bytes)
+    pending_stores = {}
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Skip empty lines and comments
+        if not stripped or stripped.startswith(';'):
+            result.append(line)
+            i += 1
+            continue
+
+        # Labels and control flow reset tracking
+        if (stripped.endswith(':') or stripped.startswith('JP') or
+            stripped.startswith('JR') or stripped.startswith('CALL') or
+            stripped == 'RET' or stripped.startswith('DJNZ')):
+            pending_stores = {}
+            result.append(line)
+            i += 1
+            continue
+
+        # Check for store to memory: LD (var),HL or LD (var),A
+        store_match = re.match(r'LD\s+\(([^)]+)\),(HL|A)$', stripped)
+        if store_match:
+            var = store_match.group(1)
+            reg = store_match.group(2)
+            size = 3 if reg == 'HL' else 3  # LD (nn),HL = 3, LD (nn),A = 3
+
+            if var in pending_stores:
+                # Previous store to same var - it's dead!
+                prev_idx, prev_size = pending_stores[var]
+                # Remove the previous store from result
+                # Find and remove it
+                for j in range(len(result) - 1, -1, -1):
+                    if result[j].strip().startswith(f'LD\t({var})'):
+                        result.pop(j)
+                        total_savings += prev_size
+                        break
+
+            # Record this store as pending
+            pending_stores[var] = (len(result), size)
+            result.append(line)
+            i += 1
+            continue
+
+        # Check for read from memory: LD r,(var) or LD HL,(var)
+        read_match = re.match(r'LD\s+(A|HL|DE|BC),\(([^)]+)\)$', stripped)
+        if read_match:
+            var = read_match.group(2)
+            # This var is read - remove from pending (store was not dead)
+            if var in pending_stores:
+                del pending_stores[var]
+            result.append(line)
+            i += 1
+            continue
+
+        # Any other instruction that might use memory indirectly
+        # For safety, clear all pending stores on complex instructions
+        if 'LDIR' in stripped or 'LDDR' in stripped or '(HL)' in stripped:
+            pending_stores = {}
+
+        result.append(line)
+        i += 1
+
+    if verbose and total_savings > 0:
+        print(f"  Dead store elimination: {total_savings} bytes saved")
+
+    return result, total_savings
+
+
 def tail_merging_pass(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
     """
     Merge common instruction sequences at the end of multiple code paths.
@@ -822,6 +993,18 @@ def optimize_asm(asm_code: str, verbose: bool = False) -> tuple[str, int]:
 
     # Pass 5: Tail merging (merge common code sequences)
     lines, savings = tail_merging_pass(lines, verbose)
+    total_savings += savings
+
+    # Pass 6: Dead store elimination
+    lines, savings = dead_store_elimination(lines, verbose)
+    total_savings += savings
+
+    # Pass 7: Address folding (LD HL,addr / INC HL * n -> LD HL,addr+n)
+    lines, savings = address_folding_pass(lines, verbose)
+    total_savings += savings
+
+    # Pass 8: Combine print_i16 + print_nl into print_i16_nl
+    lines, savings = print_combining_pass(lines, verbose)
     total_savings += savings
 
     return ''.join(lines), total_savings
