@@ -342,21 +342,20 @@ _callhl:
 
 _div8:
         LD      H,0             ; H will hold remainder
-        LD      D,8             ; 8 bits to process
-_d8lp:  SLA     A               ; Shift dividend left
-        ADC     HL,HL           ; Shift carry into remainder (H only)
-        LD      B,A             ; Save A
+        LD      B,8             ; 8 bits to process
+_d8lp:  SLA     A               ; Shift dividend left, MSB to carry
+        RL      H               ; Shift carry into remainder
+        LD      D,A             ; Save A (quotient building)
         LD      A,H
         CP      E               ; Compare remainder to divisor
         JR      C,_d8sk         ; If remainder < divisor, skip
         SUB     E               ; remainder -= divisor
         LD      H,A
-        LD      A,B
-        INC     A               ; Set quotient bit
+        LD      A,D
+        INC     A               ; Set quotient bit (LSB)
         JR      _d8nx
-_d8sk:  LD      A,B
-_d8nx:  DEC     D
-        JR      NZ,_d8lp
+_d8sk:  LD      A,D
+_d8nx:  DJNZ    _d8lp
         LD      L,H             ; Return remainder in L
         RET
 

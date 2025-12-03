@@ -482,16 +482,26 @@ class CodeGenerator:
                     self.emit("\tLD\tH,A")
                     self.emit("\tINC\tHL")
             elif expr.op == '~':
-                self.gen_expr(expr.operand, target)
-                if target == 'A':
+                operand_size = self.type_size(expr.operand.resolved_type)
+                if operand_size == 1:
+                    # 8-bit NOT
+                    self.gen_expr(expr.operand, 'A')
                     self.emit("\tCPL")
+                    if target == 'HL':
+                        self.emit("\tLD\tL,A")
+                        self.emit("\tLD\tH,0")  # Zero-extend result
                 else:
-                    self.emit("\tLD\tA,L")
-                    self.emit("\tCPL")
-                    self.emit("\tLD\tL,A")
-                    self.emit("\tLD\tA,H")
-                    self.emit("\tCPL")
-                    self.emit("\tLD\tH,A")
+                    # 16-bit NOT
+                    self.gen_expr(expr.operand, target)
+                    if target == 'A':
+                        self.emit("\tCPL")
+                    else:
+                        self.emit("\tLD\tA,L")
+                        self.emit("\tCPL")
+                        self.emit("\tLD\tL,A")
+                        self.emit("\tLD\tA,H")
+                        self.emit("\tCPL")
+                        self.emit("\tLD\tH,A")
 
         elif isinstance(expr, ast.Comparison):
             self.gen_comparison(expr)
@@ -616,51 +626,57 @@ class CodeGenerator:
             self.gen_expr(expr.left, 'A')
             self.emit("\tPUSH\tAF")
             self.gen_expr(expr.right, 'A')
-            self.emit("\tLD\tB,A")
+            self.emit("\tLD\tE,A")  # Use E for second operand (runtime expects E)
             self.emit("\tPOP\tAF")
 
             if op == '+':
-                self.emit("\tADD\tA,B")
+                self.emit("\tADD\tA,E")
             elif op == '-':
-                self.emit("\tSUB\tB")
+                self.emit("\tSUB\tE")
             elif op == '&':
-                self.emit("\tAND\tB")
+                self.emit("\tAND\tE")
             elif op == '|':
-                self.emit("\tOR\tB")
+                self.emit("\tOR\tE")
             elif op == '^':
-                self.emit("\tXOR\tB")
+                self.emit("\tXOR\tE")
             elif op == '*':
-                self.emit("\tCALL\t_mul8")
+                self.emit("\tCALL\t_mul8")  # A * E -> HL (16-bit result)
+                # Result already in HL, extract to A if needed
+                if target == 'A':
+                    self.emit("\tLD\tA,L")
+                return  # Don't do the normal A->HL conversion
             elif op == '/':
-                self.emit("\tCALL\t_div8")
+                self.emit("\tCALL\t_div8")  # A / E -> A quotient, L remainder
+                # Result in A, needs normal handling
             elif op == '%':
-                self.emit("\tCALL\t_mod8")
+                self.emit("\tCALL\t_mod8")  # A % E -> L remainder
+                self.emit("\tLD\tA,L")  # Move result to A
             elif op == '<<':
-                # Shift left by B
+                # Shift left by E
                 label = self.new_label("SHL")
                 end = self.new_label("SHLE")
                 self.emit_label(label)
-                self.emit("\tLD\tC,A")
-                self.emit("\tLD\tA,B")
+                self.emit("\tLD\tC,A")  # Save value
+                self.emit("\tLD\tA,E")
                 self.emit("\tOR\tA")
                 self.emit(f"\tJP\tZ,{end}")
-                self.emit("\tDEC\tB")
+                self.emit("\tDEC\tE")
                 self.emit("\tLD\tA,C")
                 self.emit("\tADD\tA,A")
                 self.emit(f"\tJP\t{label}")
                 self.emit_label(end)
             elif op == '>>':
-                # Shift right by B
+                # Shift right by E
                 label = self.new_label("SHR")
                 end = self.new_label("SHRE")
                 self.emit_label(label)
-                self.emit("\tLD\tC,A")
-                self.emit("\tLD\tA,B")
+                self.emit("\tLD\tC,A")  # Save value
+                self.emit("\tLD\tA,E")
                 self.emit("\tOR\tA")
                 self.emit(f"\tJP\tZ,{end}")
-                self.emit("\tDEC\tB")
+                self.emit("\tDEC\tE")
                 self.emit("\tLD\tA,C")
-                self.emit("\tOR\tA")
+                self.emit("\tOR\tA")  # Clear carry for RRA
                 self.emit("\tRRA")
                 self.emit(f"\tJP\t{label}")
                 self.emit_label(end)
@@ -715,8 +731,10 @@ class CodeGenerator:
             elif op == '%':
                 self.emit("\tCALL\t_mod16")
             elif op == '<<':
+                self.emit("\tLD\tA,E")  # Shift count in A
                 self.emit("\tCALL\t_shl16")
             elif op == '>>':
+                self.emit("\tLD\tA,E")  # Shift count in A
                 self.emit("\tCALL\t_shr16")
 
             if target == 'A':
@@ -993,12 +1011,12 @@ class CodeGenerator:
                 self.emit("\tPOP\tDE")
                 self.emit("\tPOP\tDE")
             else:
-                # Save return value, adjust SP, restore return value
-                self.emit("\tPUSH\tHL")  # Save return value
-                self.emit(f"\tLD\tHL,{stack_bytes + 2}")  # +2 for saved value
+                # Save return value in DE, adjust SP, then move back to HL
+                self.emit("\tEX\tDE,HL")  # Save return value in DE
+                self.emit(f"\tLD\tHL,{stack_bytes}")
                 self.emit("\tADD\tHL,SP")
                 self.emit("\tLD\tSP,HL")
-                self.emit("\tPOP\tHL")  # Restore return value
+                self.emit("\tEX\tDE,HL")  # Restore return value to HL
 
         # Result is in HL for 16-bit, A for 8-bit
         if target == 'A' and expr.resolved_type:

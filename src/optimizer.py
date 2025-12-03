@@ -47,6 +47,10 @@ class ASTOptimizer:
         # For loop-invariant code motion: statements hoisted from loops
         self._hoisted_stmts: List[ast.Statement] = []
 
+        # For dead store elimination: variables known to be read at outer scope
+        # This prevents eliminating assignments in nested bodies that are read outside
+        self._outer_read_vars: Set[str] = set()
+
     def optimize(self, program: ast.Program, max_passes: int = 10) -> int:
         """Run optimization passes until stable or max passes reached.
 
@@ -978,7 +982,12 @@ class ASTOptimizer:
 
         # Dead variable elimination: find all variables that are read
         # Include return_vars as they are implicitly read by the return mechanism
-        read_vars = self._get_read_vars_in_stmts(stmts) | return_vars
+        # Include _outer_read_vars to prevent eliminating assignments used in outer scope
+        read_vars = self._get_read_vars_in_stmts(stmts) | return_vars | self._outer_read_vars
+
+        # Save and update outer_read_vars for nested bodies
+        saved_outer_read_vars = self._outer_read_vars
+        self._outer_read_vars = read_vars
 
         # Track if we've seen an unconditional control flow statement
         unreachable = False
@@ -1050,6 +1059,8 @@ class ASTOptimizer:
             if isinstance(opt_stmt, (ast.ReturnStmt, ast.BreakStmt, ast.ContinueStmt)):
                 unreachable = True
 
+        # Restore outer read vars
+        self._outer_read_vars = saved_outer_read_vars
         return result
 
     def _optimize_stmt(self, stmt: ast.Statement) -> Optional[ast.Statement]:
@@ -1066,7 +1077,10 @@ class ASTOptimizer:
 
         elif isinstance(stmt, ast.Assignment):
             stmt.value = self._optimize_expr(stmt.value)
-            stmt.target = self._optimize_expr(stmt.target)
+            # Only optimize complex targets (array access, field access, dereference)
+            # Don't optimize simple identifiers - they are targets, not sources
+            if not isinstance(stmt.target, ast.Identifier):
+                stmt.target = self._optimize_expr(stmt.target)
 
             # Track assignments for copy/constant propagation
             target_var = self._get_target_var(stmt.target)
@@ -1104,18 +1118,23 @@ class ASTOptimizer:
                 self._mark_changed()
                 if const_cond != 0:
                     # Always true - use then body, eliminate if
-                    opt_body = self._optimize_statements(stmt.then_body)
-                    if len(opt_body) == 1:
-                        return opt_body[0]
-                    # Multiple statements - create a block (not ideal but works)
-                    # For now, keep the if with a simplified condition
+                    # NOTE: Don't use _optimize_statements here as it may incorrectly
+                    # eliminate assignments to variables read outside this body.
+                    # Just return the then_body statements directly; they'll be
+                    # optimized by the parent _optimize_statements call.
+                    if len(stmt.then_body) == 1:
+                        return stmt.then_body[0]
+                    elif len(stmt.then_body) == 0:
+                        return None
+                    # Multiple statements - can't return them directly, keep if
                     pass
                 else:
                     # Always false - use else body if present
                     if stmt.else_body:
-                        opt_body = self._optimize_statements(stmt.else_body)
-                        if len(opt_body) == 1:
-                            return opt_body[0]
+                        if len(stmt.else_body) == 1:
+                            return stmt.else_body[0]
+                        elif len(stmt.else_body) == 0:
+                            return None
                     elif stmt.elseifs:
                         # Try first elseif
                         pass
@@ -1191,6 +1210,7 @@ class ASTOptimizer:
 
         elif isinstance(stmt, ast.CaseStmt):
             stmt.expr = self._optimize_expr(stmt.expr)
+            # Note: _outer_read_vars propagates automatically via instance variable
             stmt.whens = [([self._optimize_expr(v) for v in vals],
                           self._optimize_statements(body))
                          for vals, body in stmt.whens]
