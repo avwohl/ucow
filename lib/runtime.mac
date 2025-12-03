@@ -336,5 +336,66 @@ _callhl:
         JP      (HL)            ; (1/4)
 
 ; ============================================================
+; 8-bit unsigned division: A / E -> A quotient, L remainder
+; Bytes: ~25
+; ============================================================
+
+_div8:
+        LD      H,0             ; H will hold remainder
+        LD      D,8             ; 8 bits to process
+_d8lp:  SLA     A               ; Shift dividend left
+        ADC     HL,HL           ; Shift carry into remainder (H only)
+        LD      B,A             ; Save A
+        LD      A,H
+        CP      E               ; Compare remainder to divisor
+        JR      C,_d8sk         ; If remainder < divisor, skip
+        SUB     E               ; remainder -= divisor
+        LD      H,A
+        LD      A,B
+        INC     A               ; Set quotient bit
+        JR      _d8nx
+_d8sk:  LD      A,B
+_d8nx:  DEC     D
+        JR      NZ,_d8lp
+        LD      L,H             ; Return remainder in L
+        RET
+
+; ============================================================
+; 8-bit unsigned modulo: A % E -> L (remainder)
+; Bytes: ~5
+; ============================================================
+
+_mod8:
+        CALL    _div8           ; A = quotient, L = remainder
+        RET                     ; Remainder already in L
+
+; ============================================================
+; 16-bit shift left: HL << A -> HL
+; Bytes: ~10
+; ============================================================
+
+_shl16:
+        OR      A               ; Check if shift count is 0
+        RET     Z
+        LD      B,A             ; B = shift count
+_sh16l: ADD     HL,HL           ; Shift left (1/11)
+        DJNZ    _sh16l          ; (2/13|8)
+        RET
+
+; ============================================================
+; 16-bit shift right: HL >> A -> HL
+; Bytes: ~15
+; ============================================================
+
+_shr16:
+        OR      A               ; Check if shift count is 0
+        RET     Z
+        LD      B,A             ; B = shift count
+_sh16r: SRL     H               ; Shift high byte right
+        RR      L               ; Shift low byte right with carry
+        DJNZ    _sh16r
+        RET
+
+; ============================================================
 ; End of runtime
 ; ============================================================

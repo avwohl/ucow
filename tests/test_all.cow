@@ -1,0 +1,810 @@
+# COMPREHENSIVE TEST SUITE FOR UCOW COWGOL COMPILER
+#
+# TESTS ALL LANGUAGE FEATURES AND PRINTS RESULTS
+# FORMAT: testname value
+#
+# BUILD:
+#   python3 ucow tests/test_all.cow -o tests/test_all.mac
+#   um80 tests/test_all.mac
+#   ul80 tests/test_all.rel -o tests/test_all.com
+#   cpmemu tests/test_all.com > tests/test_output.txt
+#   diff tests/test_output.txt tests/test_expected.txt
+
+# ==================================================================
+# GLOBAL TEST VARIABLES
+# ==================================================================
+
+var pass_count: uint16 := 0;
+var fail_count: uint16 := 0;
+
+# ==================================================================
+# TEST SECTION 1: BASIC ARITHMETIC
+# ==================================================================
+
+sub test_arithmetic() is
+    var a: uint16;
+    var b: uint16;
+    var x: uint8;
+    var y: uint8;
+
+    # 16-bit addition
+    a := 100;
+    b := 200;
+    print("add16 ");
+    print_i16(a + b);  # 300
+    print_nl();
+
+    # 16-bit subtraction
+    a := 500;
+    b := 123;
+    print("sub16 ");
+    print_i16(a - b);  # 377
+    print_nl();
+
+    # 16-bit multiplication
+    a := 25;
+    b := 12;
+    print("mul16 ");
+    print_i16(a * b);  # 300
+    print_nl();
+
+    # 16-bit division
+    a := 1000;
+    b := 7;
+    print("div16 ");
+    print_i16(a / b);  # 142
+    print_nl();
+
+    # 16-bit modulo
+    a := 1000;
+    b := 7;
+    print("mod16 ");
+    print_i16(a % b);  # 6
+    print_nl();
+
+    # 8-bit operations
+    x := 15;
+    y := 10;
+    print("add8 ");
+    print_i16((x + y) as uint16);  # 25
+    print_nl();
+    print("sub8 ");
+    print_i16((x - y) as uint16);  # 5
+    print_nl();
+    print("mul8 ");
+    print_i16((x * y) as uint16);  # 150
+    print_nl();
+
+    # Byte division
+    x := 100;
+    y := 7;
+    print("div8 ");
+    print_i16((x / y) as uint16);  # 14
+    print_nl();
+    print("mod8 ");
+    print_i16((x % y) as uint16);  # 2
+    print_nl();
+
+    # Unary minus
+    a := 100;
+    print("neg16 ");
+    print_i16(0 - a);  # 65436 (two's complement of 100)
+    print_nl();
+
+    # Complex expression
+    a := 10;
+    b := 3;
+    print("expr1 ");
+    print_i16((a + b) * 2 - 4);  # 22
+    print_nl();
+
+    # Operator precedence: * before +
+    print("prec1 ");
+    print_i16(2 + 3 * 4);  # 14
+    print_nl();
+
+    # Operator precedence with parens
+    print("prec2 ");
+    print_i16((2 + 3) * 4);  # 20
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 2: BITWISE OPERATIONS
+# ==================================================================
+
+sub test_bitwise() is
+    var a: uint16;
+    var b: uint16;
+
+    # AND
+    a := 0xFF;
+    b := 0xF0;
+    print("and1 ");
+    print_i16(a & b);  # 240
+    print_nl();
+
+    # OR
+    a := 0xF0;
+    b := 0x0F;
+    print("or1 ");
+    print_i16(a | b);  # 255
+    print_nl();
+
+    # XOR
+    a := 0xFF;
+    b := 0xAA;
+    print("xor1 ");
+    print_i16(a ^ b);  # 85
+    print_nl();
+
+    # NOT (byte)
+    var x: uint8;
+    x := 0;
+    print("not1 ");
+    print_i16((~x) as uint16 & 0xFF);  # 255
+    print_nl();
+
+    # NOT (pattern)
+    x := 0xAA;
+    print("not2 ");
+    print_i16((~x) as uint16 & 0xFF);  # 85
+    print_nl();
+
+    # Combined
+    a := 0x0F;
+    b := 0xF0;
+    print("bit1 ");
+    print_i16(a | b);  # 255
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 3: SHIFT OPERATIONS
+# ==================================================================
+
+sub test_shifts() is
+    var a: uint16;
+
+    # Shift left
+    a := 1;
+    print("shl1 ");
+    print_i16(a << 4);  # 16
+    print_nl();
+
+    a := 5;
+    print("shl2 ");
+    print_i16(a << 3);  # 40
+    print_nl();
+
+    # Shift right
+    a := 256;
+    print("shr1 ");
+    print_i16(a >> 4);  # 16
+    print_nl();
+
+    a := 160;
+    print("shr2 ");
+    print_i16(a >> 3);  # 20
+    print_nl();
+
+    # Shift by 0
+    a := 42;
+    print("shl0 ");
+    print_i16(a << 0);  # 42
+    print_nl();
+
+    print("shr0 ");
+    print_i16(a >> 0);  # 42
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 4: COMPARISON OPERATORS
+# ==================================================================
+
+sub test_comparisons() is
+    var a: uint16;
+    var b: uint16;
+    var result: uint16;
+
+    a := 10;
+    b := 10;
+
+    # Equality
+    if a == b then
+        result := 1;
+    else
+        result := 0;
+    end if;
+    print("eq1 ");
+    print_i16(result);  # 1
+    print_nl();
+
+    b := 20;
+    if a == b then
+        result := 1;
+    else
+        result := 0;
+    end if;
+    # Result should be 0, but we test != here
+    if a != b then
+        result := 1;
+    else
+        result := 0;
+    end if;
+    print("neq1 ");
+    print_i16(result);  # 1
+    print_nl();
+
+    # Less than
+    a := 5;
+    b := 10;
+    if a < b then
+        result := 1;
+    else
+        result := 0;
+    end if;
+    print("lt1 ");
+    print_i16(result);  # 1
+    print_nl();
+
+    a := 10;
+    b := 5;
+    if a < b then
+        result := 1;
+    else
+        result := 0;
+    end if;
+    print("lt2 ");
+    print_i16(result);  # 0
+    print_nl();
+
+    # Greater than
+    a := 10;
+    b := 5;
+    if a > b then
+        result := 1;
+    else
+        result := 0;
+    end if;
+    print("gt1 ");
+    print_i16(result);  # 1
+    print_nl();
+
+    # Less than or equal
+    a := 10;
+    b := 10;
+    if a <= b then
+        result := 1;
+    else
+        result := 0;
+    end if;
+    print("lte1 ");
+    print_i16(result);  # 1
+    print_nl();
+
+    # Greater than or equal
+    a := 10;
+    b := 10;
+    if a >= b then
+        result := 1;
+    else
+        result := 0;
+    end if;
+    print("gte1 ");
+    print_i16(result);  # 1
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 5: CONTROL FLOW - WHILE
+# ==================================================================
+
+sub test_while() is
+    var i: uint16;
+    var sum: uint16;
+
+    # Basic while loop
+    i := 0;
+    sum := 0;
+    while i < 6 loop
+        sum := sum + i;
+        i := i + 1;
+    end loop;
+    print("while1 ");
+    print_i16(sum);  # 0+1+2+3+4+5 = 15
+    print_nl();
+
+    # While that never executes
+    i := 100;
+    while i < 10 loop
+        i := i + 1;
+    end loop;
+    print("while2 ");
+    print_i16(i);  # 100 (never entered)
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 6: CONTROL FLOW - LOOP WITH BREAK
+# ==================================================================
+
+sub test_loop() is
+    var i: uint16;
+    var sum: uint16;
+
+    # Basic loop with break
+    i := 0;
+    sum := 0;
+    loop
+        if i >= 6 then
+            break;
+        end if;
+        sum := sum + i;
+        i := i + 1;
+    end loop;
+    print("loop1 ");
+    print_i16(sum);  # 0+1+2+3+4+5 = 15
+    print_nl();
+
+    # Loop with continue
+    i := 0;
+    sum := 0;
+    loop
+        i := i + 1;
+        if i > 10 then
+            break;
+        end if;
+        if (i % 2) == 0 then
+            continue;
+        end if;
+        sum := sum + i;  # Only odd numbers
+    end loop;
+    print("loop2 ");
+    print_i16(sum);  # 1+3+5+7+9 = 25
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 7: CONTROL FLOW - CASE
+# ==================================================================
+
+sub test_case() is
+    var x: uint8;
+    var result: uint16;
+
+    # Case 0
+    x := 0;
+    case x is
+        when 0: result := 100;
+        when 1: result := 101;
+        when 2: result := 102;
+        when else: result := 99;
+    end case;
+    print("case0 ");
+    print_i16(result);  # 100
+    print_nl();
+
+    # Case 1
+    x := 1;
+    case x is
+        when 0: result := 100;
+        when 1: result := 101;
+        when 2: result := 102;
+        when else: result := 99;
+    end case;
+    print("case1 ");
+    print_i16(result);  # 101
+    print_nl();
+
+    # Case 2
+    x := 2;
+    case x is
+        when 0: result := 100;
+        when 1: result := 101;
+        when 2: result := 102;
+        when else: result := 99;
+    end case;
+    print("case2 ");
+    print_i16(result);  # 102
+    print_nl();
+
+    # Case else (out of range)
+    x := 5;
+    case x is
+        when 0: result := 100;
+        when 1: result := 101;
+        when 2: result := 102;
+        when else: result := 99;
+    end case;
+    print("case3 ");
+    print_i16(result);  # 99
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 8: ARRAYS
+# ==================================================================
+
+sub test_arrays() is
+    var arr: uint8[10];
+    var aarr: uint16[5];
+    var i: uint16;
+    var sum: uint16;
+
+    # Byte array
+    i := 0;
+    while i < 10 loop
+        arr[i] := (i * 2) as uint8;
+        i := i + 1;
+    end loop;
+
+    print("arr1 ");
+    print_i16(arr[0] as uint16);  # 0
+    print_nl();
+
+    print("arr2 ");
+    print_i16(arr[5] as uint16);  # 10
+    print_nl();
+
+    print("arr3 ");
+    print_i16(arr[9] as uint16);  # 18
+    print_nl();
+
+    # Address array
+    aarr[0] := 1000;
+    aarr[1] := 2000;
+    aarr[2] := 3000;
+    aarr[3] := 4000;
+    aarr[4] := 5000;
+
+    print("aarr1 ");
+    print_i16(aarr[0]);  # 1000
+    print_nl();
+
+    print("aarr2 ");
+    print_i16(aarr[1]);  # 2000
+    print_nl();
+
+    print("aarr3 ");
+    print_i16(aarr[2]);  # 3000
+    print_nl();
+
+    # Array sum
+    sum := 0;
+    i := 0;
+    while i < 5 loop
+        sum := sum + arr[i] as uint16;
+        i := i + 1;
+    end loop;
+    print("arrsum ");
+    print_i16(sum);  # 0+2+4+6+8 = 20
+    print_nl();
+
+    # @sizeof
+    print("size1 ");
+    print_i16(@sizeof arr);  # 10
+    print_nl();
+
+    print("size2 ");
+    print_i16(@sizeof aarr);  # 10 (5 * 2 bytes)
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 9: PROCEDURES WITH RETURN VALUES
+# ==================================================================
+
+sub void_proc() is
+    pass_count := pass_count + 1;
+end sub;
+
+sub byte_proc(): (ret: uint8) is
+    ret := 42;
+end sub;
+
+sub addr_proc(): (ret: uint16) is
+    ret := 1234;
+end sub;
+
+sub add_proc(a: uint16, b: uint16): (ret: uint16) is
+    ret := a + b;
+end sub;
+
+sub mul3_proc(a: uint16, b: uint16, c: uint16): (ret: uint16) is
+    ret := a * b * c;
+end sub;
+
+sub factorial(n: uint16): (ret: uint16) is
+    if n <= 1 then
+        ret := 1;
+    else
+        ret := n * factorial(n - 1);
+    end if;
+end sub;
+
+sub test_procedures() is
+    var result: uint16;
+
+    # Void procedure
+    pass_count := 0;
+    void_proc();
+    print("proc1 ");
+    print_i16(pass_count);  # 1
+    print_nl();
+
+    # Byte return
+    print("proc2 ");
+    print_i16(byte_proc() as uint16);  # 42
+    print_nl();
+
+    # Address return
+    print("proc3 ");
+    print_i16(addr_proc());  # 1234
+    print_nl();
+
+    # Two parameters
+    print("proc4 ");
+    print_i16(add_proc(7, 8));  # 15
+    print_nl();
+
+    # Three parameters
+    print("proc5 ");
+    print_i16(mul3_proc(4, 5, 10));  # 200
+    print_nl();
+
+    # Recursive factorial
+    print("fact5 ");
+    print_i16(factorial(5));  # 120
+    print_nl();
+
+    print("fact6 ");
+    print_i16(factorial(6));  # 720
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 10: RECORDS (STRUCTURES)
+# ==================================================================
+
+record Point is
+    x: uint16;
+    y: uint16;
+end record;
+
+record Rect is
+    origin: Point;
+    size: Point;
+end record;
+
+sub test_records() is
+    var p: Point;
+    var r: Rect;
+
+    # Simple record
+    p.x := 10;
+    p.y := 20;
+    print("rec1 ");
+    print_i16(p.x);  # 10
+    print_nl();
+
+    print("rec2 ");
+    print_i16(p.y);  # 20
+    print_nl();
+
+    # Nested record
+    r.origin.x := 100;
+    r.origin.y := 200;
+    r.size.x := 30;
+    r.size.y := 40;
+
+    print("rec3 ");
+    print_i16(r.origin.x);  # 100
+    print_nl();
+
+    print("rec4 ");
+    print_i16(r.origin.y);  # 200
+    print_nl();
+
+    print("rec5 ");
+    print_i16(r.size.x);  # 30
+    print_nl();
+
+    print("rec6 ");
+    print_i16(r.size.y);  # 40
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 11: POINTERS
+# ==================================================================
+
+sub test_pointers() is
+    var x: uint16;
+    var p: [uint16];
+    var arr: uint16[3];
+
+    # Basic pointer
+    x := 100;
+    p := &x;
+    print("ptr1 ");
+    print_i16(p[0]);  # 100
+    print_nl();
+
+    # Modify through pointer
+    p[0] := 200;
+    print("ptr2 ");
+    print_i16(x);  # 200
+    print_nl();
+
+    # Pointer to array element
+    arr[0] := 10;
+    arr[1] := 20;
+    arr[2] := 30;
+    p := &arr[1];
+    print("ptr3 ");
+    print_i16(p[0]);  # 20
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 12: ARRAY INITIALIZATION
+# ==================================================================
+
+var init_arr: uint8[] := {10, 20, 30, 40, 50};
+
+sub test_initialization() is
+    print("init1 ");
+    print_i16(init_arr[0] as uint16);  # 10
+    print_nl();
+
+    print("init2 ");
+    print_i16(init_arr[2] as uint16);  # 30
+    print_nl();
+
+    print("init3 ");
+    print_i16(init_arr[4] as uint16);  # 50
+    print_nl();
+
+    # Sum of initialized array
+    var sum: uint16 := 0;
+    var i: uint16 := 0;
+    while i < 5 loop
+        sum := sum + init_arr[i] as uint16;
+        i := i + 1;
+    end loop;
+    print("init4 ");
+    print_i16(sum);  # 10+20+30+40+50 = 150
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 13: TYPE CASTING
+# ==================================================================
+
+sub test_casts() is
+    var b: uint8;
+    var w: uint16;
+
+    # Byte to word
+    b := 200;
+    w := b as uint16;
+    print("cast1 ");
+    print_i16(w);  # 200
+    print_nl();
+
+    # Word to byte (truncate)
+    w := 0x1234;
+    b := w as uint8;
+    print("cast2 ");
+    print_i16(b as uint16);  # 0x34 = 52
+    print_nl();
+
+    # High byte extraction
+    w := 0xABCD;
+    b := (w >> 8) as uint8;
+    print("cast3 ");
+    print_i16(b as uint16);  # 0xAB = 171
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 14: CONSTANTS
+# ==================================================================
+
+const MAX_VALUE := 1000;
+const HALF_VALUE := MAX_VALUE / 2;
+
+sub test_constants() is
+    print("const1 ");
+    print_i16(MAX_VALUE);  # 1000
+    print_nl();
+
+    print("const2 ");
+    print_i16(HALF_VALUE);  # 500
+    print_nl();
+
+    var x: uint16 := MAX_VALUE - 100;
+    print("const3 ");
+    print_i16(x);  # 900
+    print_nl();
+end sub;
+
+# ==================================================================
+# TEST SECTION 15: EDGE CASES
+# ==================================================================
+
+sub test_edge_cases() is
+    var b: uint8;
+    var w: uint16;
+
+    # Max byte value
+    b := 255;
+    print("edge1 ");
+    print_i16(b as uint16);  # 255
+    print_nl();
+
+    # Max word value
+    w := 65535;
+    print("edge2 ");
+    print_i16(w);  # 65535
+    print_nl();
+
+    # Zero
+    w := 0;
+    print("edge3 ");
+    print_i16(w);  # 0
+    print_nl();
+
+    # Byte overflow wraps
+    b := 255;
+    b := b + 1;
+    print("edge4 ");
+    print_i16(b as uint16);  # 0
+    print_nl();
+
+    # Underflow wraps
+    b := 0;
+    b := b - 1;
+    print("edge5 ");
+    print_i16(b as uint16);  # 255
+    print_nl();
+
+    # Division by larger number
+    w := 5;
+    print("edge6 ");
+    print_i16(w / 10);  # 0
+    print_nl();
+
+    # Modulo by larger number
+    w := 5;
+    print("edge7 ");
+    print_i16(w % 10);  # 5
+    print_nl();
+end sub;
+
+# ==================================================================
+# MAIN TEST RUNNER
+# ==================================================================
+
+print("Cowgol Compiler Test Suite\r\n");
+print("==========================\r\n\r\n");
+
+test_arithmetic();
+test_bitwise();
+test_shifts();
+test_comparisons();
+test_while();
+test_loop();
+test_case();
+test_arrays();
+test_procedures();
+test_records();
+test_pointers();
+test_initialization();
+test_casts();
+test_constants();
+test_edge_cases();
+
+print("\r\nTests complete.\r\n");
