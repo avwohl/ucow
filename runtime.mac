@@ -1,0 +1,340 @@
+; ucow runtime library for Z80/CP/M
+; This file is included in generated assembly
+
+; ============================================================
+; BDOS interface
+; ============================================================
+
+BDOS    EQU     5
+CONOUT  EQU     2
+PRTSTR  EQU     9
+
+; ============================================================
+; Console output
+; ============================================================
+
+; Print character in A
+; Bytes: ~20, Cycles: ~80 + BDOS
+print_char:
+        PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        LD      E,A
+        LD      C,CONOUT
+        CALL    BDOS
+        POP     HL
+        POP     DE
+        POP     BC
+        RET
+
+; Print string (argument on stack - pointer to null-terminated string)
+; Stack: [ret addr][string pointer]
+; Bytes: ~25, Cycles: varies
+print:
+        PUSH    BC
+        PUSH    DE
+        PUSH    HL
+        ; Get string pointer from stack (SP+8 = argument)
+        LD      HL,8
+        ADD     HL,SP
+        LD      E,(HL)
+        INC     HL
+        LD      D,(HL)
+        EX      DE,HL           ; HL = string pointer
+        JR      _prlp           ; Share loop with internal version
+
+; Internal print - string pointer in HL (for use by runtime routines)
+_print_hl:
+        PUSH    BC
+        PUSH    DE
+        PUSH    HL
+_prlp:  LD      A,(HL)
+        OR      A               ; Test for zero (1/4) - faster than CP 0 (2/7)
+        JR      Z,_prdn         ; Use JR for short branch (2/12 vs JP 3/10) - saves 1 byte
+        PUSH    HL
+        LD      E,A
+        LD      C,CONOUT
+        CALL    BDOS
+        POP     HL
+        INC     HL              ; (1/6)
+        JR      _prlp           ; Short backward branch (2/12)
+_prdn:  POP     HL
+        POP     DE
+        POP     BC
+        RET
+
+; Print newline
+; Bytes: 9
+print_nl:
+        LD      A,13
+        CALL    print_char
+        LD      A,10
+        JP      print_char      ; Tail call saves RET (3/10 vs CALL+RET)
+
+; Print 8-bit unsigned (argument on stack as 16-bit)
+; Stack: [ret addr][value as 16-bit]
+; Bytes: ~15
+print_i8:
+        ; Fall through to print_i16 since value is already 16-bit on stack
+
+; Print 16-bit unsigned (argument on stack)
+; Stack: [ret addr][value]
+; Bytes: ~80, Cycles: varies with value
+print_i16:
+        PUSH    BC
+        PUSH    DE
+        PUSH    HL
+
+        ; Get argument from stack: SP+8 = value
+        ; Stack after pushes: SP -> [HL][DE][BC][ret][arg]
+        ;                          +0  +2  +4  +6   +8
+        LD      HL,8            ; Offset to argument
+        ADD     HL,SP
+        LD      E,(HL)
+        INC     HL
+        LD      D,(HL)
+        EX      DE,HL           ; HL = argument value
+
+        ; Convert to decimal string
+        ; Use C as buffer index (0-5), B is temp
+        LD      C,5             ; Start at end of buffer
+
+        ; Store null terminator
+        PUSH    HL              ; Save value
+        LD      HL,_numbuf+5
+        LD      (HL),0
+        POP     HL              ; Restore value to divide
+
+_p16lp: ; Divide HL by 10
+        PUSH    BC              ; Save buffer index in C
+        LD      DE,10
+        CALL    _div16          ; HL = quotient, DE = remainder
+
+        ; Store digit
+        LD      A,E             ; Remainder is the digit
+        ADD     A,'0'           ; Convert to ASCII
+        POP     BC              ; Restore index in C
+        DEC     C               ; Move to next position
+        PUSH    HL              ; Save quotient
+        PUSH    BC              ; Save index again
+        LD      HL,_numbuf
+        LD      B,0
+        ADD     HL,BC           ; Point to buffer position
+        LD      (HL),A          ; Store digit
+        POP     BC              ; Restore index
+        POP     HL              ; Restore quotient
+
+        ; Check if done (quotient == 0)
+        LD      A,H
+        OR      L
+        JR      NZ,_p16lp
+
+        ; Print the string starting at _numbuf+C
+        LD      HL,_numbuf
+        LD      B,0
+        ADD     HL,BC
+        CALL    _print_hl       ; Internal call, string in HL
+
+        POP     HL
+        POP     DE
+        POP     BC
+        RET
+
+_numbuf: DS     6               ; Buffer for number conversion
+
+; Print 16-bit unsigned in hex (argument on stack)
+; Stack: [ret addr][value]
+; Bytes: ~40
+print_hex_i16:
+        PUSH    BC
+        PUSH    DE
+        PUSH    HL
+
+        ; Get argument from stack: SP+8 = value
+        LD      HL,8
+        ADD     HL,SP
+        LD      E,(HL)
+        INC     HL
+        LD      D,(HL)
+        EX      DE,HL           ; HL = value
+
+        ; Print high byte first
+        LD      A,H
+        CALL    _prhex2
+        ; Then low byte
+        LD      A,L
+        CALL    _prhex2
+
+        POP     HL
+        POP     DE
+        POP     BC
+        RET
+
+; Print 2 hex digits from A
+_prhex2:
+        PUSH    AF
+        RRCA
+        RRCA
+        RRCA
+        RRCA
+        CALL    _prhex1
+        POP     AF
+        ; Fall through to _prhex1
+
+; Print 1 hex digit from low nibble of A
+_prhex1:
+        AND     0Fh
+        ADD     A,'0'
+        CP      '9'+1
+        JR      C,_prhx1
+        ADD     A,'A'-'0'-10
+_prhx1: JP      print_char
+
+; ============================================================
+; 16-bit unsigned division: HL / DE -> HL quotient, DE remainder
+; Bytes: ~40, Cycles: ~500
+; ============================================================
+
+; 16-bit unsigned division
+; HL / DE -> HL quotient, DE remainder
+; Uses DJNZ with B as counter, saves original BC on stack
+_div16:
+        LD      A,H
+        OR      L
+        JR      Z,_dv0          ; Return 0 if dividend is 0
+        LD      A,D
+        OR      E
+        JR      Z,_dv0          ; Return 0 if divisor is 0
+
+        PUSH    BC              ; Save BC
+        ; Move dividend to stack, use BC for quotient building
+        PUSH    HL              ; Save dividend high
+        LD      B,16            ; Counter
+        LD      HL,0            ; HL = remainder
+        ; Dividend is at (SP), quotient builds in C, we'll shift it
+
+        ; Actually simpler: use A as temp, store counter elsewhere
+        ; Let's use the stack for the counter
+        EX      (SP),HL         ; HL = dividend, (SP) = 0 (will be remainder temp)
+        LD      C,L             ; C = dividend low
+        LD      A,H             ; A = dividend high (we'll rotate through A,C)
+        POP     HL              ; HL = 0 (remainder)
+        LD      B,16            ; B = counter
+
+_dvlp:  ; Shift A,C left (dividend/quotient), MSB goes to remainder
+        SLA     C
+        RLA                     ; A = high byte of shifting dividend
+        ADC     HL,HL           ; Shift carry into remainder
+        ; Compare remainder to divisor
+        PUSH    AF              ; Save A (dividend high) and flags
+        OR      A               ; Clear carry for SBC
+        SBC     HL,DE
+        JR      C,_dvsk         ; If remainder < divisor, undo
+        ; remainder >= divisor, set quotient bit
+        POP     AF              ; Restore A
+        INC     C               ; Set quotient bit in C
+        JR      _dvnx
+_dvsk:  ADD     HL,DE           ; Undo subtraction
+        POP     AF              ; Restore A
+_dvnx:  DJNZ    _dvlp           ; Decrement B and loop
+
+        ; A,C = quotient (A=high, C=low), HL = remainder
+        EX      DE,HL           ; DE = remainder
+        LD      H,A             ; HL = quotient
+        LD      L,C
+        POP     BC              ; Restore BC
+        RET
+
+_dv0:   LD      HL,0
+        LD      DE,0
+        RET
+
+; ============================================================
+; 16-bit unsigned modulo: HL % DE -> HL (remainder)
+; Bytes: ~10 (calls _div16)
+; ============================================================
+
+_mod16:
+        CALL    _div16          ; HL = quotient, DE = remainder
+        EX      DE,HL           ; HL = remainder
+        RET
+
+; ============================================================
+; 16-bit multiplication: HL * DE -> HL (low 16 bits)
+; Bytes: ~25, Cycles: ~350
+; ============================================================
+
+_mul16:
+        PUSH    BC
+        LD      B,H
+        LD      C,L             ; BC = multiplier
+        LD      HL,0            ; HL = result
+        LD      A,16            ; 16 bits
+
+_mllp:  SRA     D               ; Shift DE right, LSB to carry
+        RR      E
+        JR      NC,_mlsk        ; If bit was 0, skip add
+        ADD     HL,BC           ; Add multiplier to result
+_mlsk:  SLA     C               ; Shift BC left (double it)
+        RL      B
+        DEC     A
+        JR      NZ,_mllp
+
+        POP     BC
+        RET
+
+; ============================================================
+; 8-bit multiplication: A * E -> HL
+; Bytes: ~20, Cycles: ~200
+; ============================================================
+
+_mul8:
+        LD      H,A             ; H = multiplier
+        LD      L,0             ; L = result low
+        LD      D,L             ; D = 0 for 16-bit shift
+        LD      B,8             ; 8 bits
+
+_m8lp:  ADD     HL,HL           ; Shift result left (1/11)
+        JR      NC,_m8sk        ; If high bit wasn't set, skip
+        ADD     HL,DE           ; Add E (in DE with D=0) to result
+_m8sk:  DJNZ    _m8lp           ; Decrement B and loop (2/13|8) - saves 2 bytes vs DEC B/JR NZ
+
+        RET
+
+; ============================================================
+; Compare HL to DE (signed)
+; Returns: carry if HL < DE, zero if HL == DE
+; Bytes: ~10
+; ============================================================
+
+_cmp16:
+        OR      A               ; Clear carry
+        SBC     HL,DE           ; HL = HL - DE, sets flags (2/15)
+        ADD     HL,DE           ; Restore HL (1/11)
+        RET
+
+; ============================================================
+; Negate HL: HL = -HL
+; Bytes: ~8
+; ============================================================
+
+_neghl:
+        XOR     A               ; A = 0, clear carry
+        SUB     L
+        LD      L,A
+        SBC     A,A             ; A = 0 or -1 based on carry
+        SUB     H
+        LD      H,A
+        RET
+
+; ============================================================
+; Call through HL (for function pointers)
+; Bytes: 1
+; ============================================================
+
+_callhl:
+        JP      (HL)            ; (1/4)
+
+; ============================================================
+; End of runtime
+; ============================================================

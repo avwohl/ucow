@@ -3,6 +3,6 @@ __pycache__/
 *.rel
 *.com
 *.prn
-*.mac
+tests/**.mac
 *.bak
 /tmp/

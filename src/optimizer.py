@@ -1353,7 +1353,17 @@ class ASTOptimizer:
             expr.pointer = self._optimize_expr(expr.pointer)
 
         elif isinstance(expr, ast.AddressOf):
-            expr.operand = self._optimize_expr(expr.operand)
+            # Don't apply constant/copy propagation to address-of operand
+            # The operand is an lvalue (location), not a value
+            # We still need to optimize index expressions in array accesses though
+            if isinstance(expr.operand, ast.ArrayAccess):
+                # Only optimize the index, not the array base
+                expr.operand.index = self._optimize_expr(expr.operand.index)
+            elif isinstance(expr.operand, ast.FieldAccess):
+                # Only optimize nested field accesses if the record is complex
+                if not isinstance(expr.operand.record, ast.Identifier):
+                    expr.operand.record = self._optimize_expr(expr.operand.record)
+            # Don't optimize simple identifiers - they're lvalues
 
         elif isinstance(expr, ast.Call):
             expr.target = self._optimize_expr(expr.target)
