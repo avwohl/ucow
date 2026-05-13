@@ -3,8 +3,7 @@
 from pathlib import Path
 from typing import List, Set, Optional
 from . import ast
-from .lexer import Lexer
-from .parser import Parser
+from .parser import parse_string
 
 
 class PreprocessorError(Exception):
@@ -61,11 +60,9 @@ class Preprocessor:
 
         self.included_files.add(filepath)
 
-        # Read and parse
+        # Read and parse.
         source = Path(filepath).read_text()
-        lexer = Lexer(source, filepath)
-        parser = Parser(lexer)
-        program = parser.parse()
+        program = parse_string(source, filepath)
 
         # Process items in source order - interleave declarations and statements
         # to maintain proper ordering (e.g., const before include that uses it)

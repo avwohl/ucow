@@ -1,942 +1,664 @@
-"""Recursive descent parser for Cowgol."""
+"""Cowgol parser.
 
-from typing import List, Optional, Tuple, Callable
-from .tokens import Token, TokenType, SourceLocation
-from .lexer import Lexer, LexerError
-from . import ast
+After the v3 uplox migration this module is no longer a hand-written
+recursive-descent parser — it's a thin translator from the
+uplox-generated AST (``uplox_cowgol``) into the ucow ``ast`` class
+hierarchy. The public API (``parse_string``, ``parse_file``,
+``ParseError``, ``Parser``) is preserved so downstream consumers
+keep working unchanged.
+
+What this gives us:
+
+* The LR(1) tables come from ``examples/cowgol_ast.uplox`` in the
+  uplox repo, regenerated whenever the grammar changes. No more
+  hand-rolled recursive-descent code to maintain.
+* The lexer and parser layers (~1300 lines combined) collapse into
+  this translator. The ``ast.py`` schema remains the consumer-facing
+  shape; the v3 AST is structurally similar enough that translation
+  is a mechanical walk.
+* Source positions are preserved by computing each ucow ``Node.location``
+  from the v3 ``pos`` spans the generator emits.
+
+Notable structural differences the translator bridges:
+
+* v3 ``Program.items`` is a flat list of top-level items; ucow splits
+  into ``declarations: List[Declaration]`` and ``statements: List[Statement]``.
+* v3 splits sub-decl into ``SubDecl`` / ``SubForwardDecl`` / ``SubImpl``;
+  ucow folds them into one ``SubDecl`` with ``is_decl`` / ``is_impl``
+  discriminators.
+* v3 splits scalar types per keyword (``Int8Type``, ``UInt8Type``, …);
+  ucow uses a single ``ScalarType`` with a ``name: str`` field.
+* v3 emits ``Negate`` / ``BitNot`` etc; ucow uses ``UnaryOp(op='-')``.
+* v3 list children carry typed AST kinds (``ElseIf`` nodes); ucow uses
+  raw tuples like ``elseifs: List[tuple]``.
+"""
+
+from __future__ import annotations
+
+from typing import Any, List, Optional, Union
+
+from . import ast as _ast
+from .tokens import SourceLocation
+
+# Import the generated uplox module. Vendored alongside this file.
+from . import uplox_cowgol as _ucg
+
+
+# ---- Public API: error type kept for compatibility --------------------------
 
 
 class ParseError(Exception):
-    """Error during parsing."""
+    """Error during parsing.
+
+    Mirrors the pre-uplox class so existing consumers' ``except``
+    blocks don't need to change. The underlying parser is now
+    ``uplox.parse.runtime``; this wrapper translates its ``ParseError``
+    into the ucow-shaped one with a ``location: SourceLocation``.
+    """
+
     def __init__(self, message: str, location: SourceLocation):
         self.location = location
         super().__init__(f"{location}: {message}")
 
 
+# ---- Public entry points ----------------------------------------------------
+
+
+def parse_file(filename: str) -> _ast.Program:
+    """Parse a Cowgol source file."""
+    with open(filename, "r", encoding="utf-8") as fh:
+        source = fh.read()
+    return parse_string(source, filename)
+
+
+def parse_string(source: str, filename: str = "<input>") -> _ast.Program:
+    """Parse a Cowgol source string.
+
+    Calls the uplox-generated parser, then walks the resulting v3 AST
+    to produce ucow's ``ast.Program``. Raises :class:`ParseError` on
+    syntax or lexical errors (both translated from the uplox runtime).
+    """
+    # ScanError lives in uplox.lex.scanner; the generated module
+    # doesn't re-export it, so we look it up via the runtime import.
+    from uplox.lex.scanner import ScanError
+
+    try:
+        v3_root = _ucg.parse(source)
+    except _ucg.ParseError as e:
+        tok = getattr(e, "token", None)
+        if tok is not None:
+            loc = SourceLocation(filename, tok.line, tok.column)
+        else:
+            loc = SourceLocation(filename, 1, 1)
+        raise ParseError(str(e), loc) from e
+    except ScanError as e:
+        loc = SourceLocation(filename, getattr(e, "line", 1), getattr(e, "column", 1))
+        raise ParseError(str(e), loc) from e
+    return _translate(v3_root, filename)
+
+
 class Parser:
-    """Recursive descent parser for Cowgol."""
+    """Compatibility shim — wraps :func:`parse_string` over a source string.
 
-    def __init__(self, lexer: Lexer):
-        self.lexer = lexer
-        self.current: Token = None
-        self.peeked: Token = None
-        self._advance()
+    Pre-v3 ucow constructed a ``Parser(Lexer(source, filename))`` and
+    called ``.parse()``. The shim keeps that two-step interface working
+    for now; new code should call :func:`parse_string` directly.
+    """
 
-    def _advance(self) -> Token:
-        """Consume current token and get next."""
-        prev = self.current
-        if self.peeked:
-            self.current = self.peeked
-            self.peeked = None
+    def __init__(self, lexer_or_source):
+        # Old code passed a Lexer instance; new code can pass a raw string.
+        if hasattr(lexer_or_source, "source"):
+            self._source = lexer_or_source.source
+            self._filename = getattr(lexer_or_source, "filename", "<input>")
         else:
-            self.current = self.lexer.next_token()
-        return prev
-
-    def _peek_next(self) -> Token:
-        """Look at next token without consuming current."""
-        if not self.peeked:
-            self.peeked = self.lexer.next_token()
-        return self.peeked
-
-    def _at(self, *types: TokenType) -> bool:
-        """Check if current token is one of the given types."""
-        return self.current.type in types
-
-    def _at_keyword(self, *keywords: str) -> bool:
-        """Check if current token is one of the given keywords."""
-        if self.current.type == TokenType.ID:
-            return self.current.value in keywords
-        return False
-
-    def _match(self, *types: TokenType) -> Optional[Token]:
-        """Consume token if it matches, else return None."""
-        if self._at(*types):
-            return self._advance()
-        return None
-
-    def _expect(self, type: TokenType, message: str = None) -> Token:
-        """Consume token of given type or raise error."""
-        if not self._at(type):
-            msg = message or f"Expected {type.name}"
-            raise ParseError(msg, self.current.location)
-        return self._advance()
-
-    def _expect_keyword(self, keyword: str) -> Token:
-        """Consume keyword or raise error."""
-        if self.current.type == TokenType.ID and self.current.value == keyword:
-            return self._advance()
-        raise ParseError(f"Expected '{keyword}'", self.current.location)
-
-    def _location(self) -> SourceLocation:
-        """Get current source location."""
-        return self.current.location
-
-    # Type parsing
-
-    def _parse_base_type(self) -> ast.Type:
-        """Parse a base type (not array or pointer)."""
-        loc = self._location()
-
-        # Built-in scalar types
-        scalar_types = {
-            TokenType.INT8: 'int8',
-            TokenType.UINT8: 'uint8',
-            TokenType.INT16: 'int16',
-            TokenType.UINT16: 'uint16',
-            TokenType.INT32: 'int32',
-            TokenType.UINT32: 'uint32',
-            TokenType.INTPTR: 'intptr',
-        }
-
-        for tt, name in scalar_types.items():
-            if self._match(tt):
-                return ast.ScalarType(loc, name)
-
-        # Pointer type: [T]
-        if self._match(TokenType.LBRACKET):
-            target = self._parse_type()
-            self._expect(TokenType.RBRACKET, "Expected ']' after pointer target type")
-            return ast.PointerType(loc, target)
-
-        # @indexof/@sizeof as type expressions
-        if self._match(TokenType.AT):
-            op = self._expect(TokenType.ID, "Expected @ operator name").value
-            target = self._expect(TokenType.ID, "Expected array/type name").value
-            if op == 'indexof':
-                return ast.IndexOfType(loc, target)
-            elif op == 'sizeof':
-                return ast.SizeOfType(loc, target)
-            else:
-                raise ParseError(f"Unknown type operator: @{op}", loc)
-
-        # Named type (record, typedef)
-        if self._at(TokenType.ID):
-            name = self._advance().value
-            # Handle ranged integer type: int(min, max)
-            if name == 'int' and self._match(TokenType.LPAREN):
-                # Parse min expression
-                min_expr = self._parse_expression()
-                self._expect(TokenType.COMMA, "Expected ',' in int(min, max)")
-                # Parse max expression
-                max_expr = self._parse_expression()
-                self._expect(TokenType.RPAREN, "Expected ')' in int(min, max)")
-                return ast.RangedIntType(loc, min_expr, max_expr)
-            return ast.NamedType(loc, name)
-
-        raise ParseError("Expected type", loc)
-
-    def _parse_type(self) -> ast.Type:
-        """Parse a type, including array types."""
-        base = self._parse_base_type()
-
-        # Array type: T[size]
-        while self._match(TokenType.LBRACKET):
-            if self._match(TokenType.RBRACKET):
-                # Empty brackets - size inferred
-                base = ast.ArrayType(base.location, base, None)
-            else:
-                size = self._parse_expression()
-                self._expect(TokenType.RBRACKET, "Expected ']' after array size")
-                base = ast.ArrayType(base.location, base, size)
-
-        return base
-
-    # Expression parsing (precedence climbing)
-
-    def _parse_primary(self) -> ast.Expression:
-        """Parse primary expression."""
-        loc = self._location()
-
-        # Number
-        if self._at(TokenType.NUMBER):
-            value = self._advance().value
-            return ast.NumberLiteral(loc, value)
-
-        # String
-        if self._at(TokenType.STRING):
-            value = self._advance().value
-            return ast.StringLiteral(loc, value)
-
-        # nil
-        if self._match(TokenType.NIL):
-            return ast.NilLiteral(loc)
-
-        # Parenthesized expression or tuple
-        if self._match(TokenType.LPAREN):
-            expr = self._parse_expression()
-            self._expect(TokenType.RPAREN, "Expected ')'")
-            return expr
-
-        # Array/record initializer
-        if self._match(TokenType.LBRACE):
-            elements = []
-            if not self._at(TokenType.RBRACE):
-                elements.append(self._parse_expression())
-                while self._match(TokenType.COMMA):
-                    # Allow trailing comma
-                    if self._at(TokenType.RBRACE):
-                        break
-                    elements.append(self._parse_expression())
-            self._expect(TokenType.RBRACE, "Expected '}'")
-            return ast.ArrayInitializer(loc, elements)
-
-        # Dereference: [expr]
-        if self._match(TokenType.LBRACKET):
-            expr = self._parse_expression()
-            self._expect(TokenType.RBRACKET, "Expected ']'")
-            return ast.Dereference(loc, expr)
-
-        # @ operators
-        if self._match(TokenType.AT):
-            name = self._expect(TokenType.ID, "Expected @ operator name").value
-
-            if name == 'sizeof':
-                target = self._parse_unary()
-                return ast.SizeOf(loc, target)
-            elif name == 'bytesof':
-                # @bytesof can take a type name or expression
-                # Check for type keywords first
-                scalar_types = {
-                    TokenType.INT8: 'int8', TokenType.UINT8: 'uint8',
-                    TokenType.INT16: 'int16', TokenType.UINT16: 'uint16',
-                    TokenType.INT32: 'int32', TokenType.UINT32: 'uint32',
-                    TokenType.INTPTR: 'intptr',
-                }
-                for tt, tname in scalar_types.items():
-                    if self._match(tt):
-                        return ast.BytesOf(loc, ast.Identifier(loc, tname))
-                target = self._parse_unary()
-                return ast.BytesOf(loc, target)
-            elif name == 'indexof':
-                target = self._parse_unary()
-                return ast.IndexOf(loc, target)
-            elif name == 'next':
-                target = self._parse_unary()
-                return ast.Next(loc, target)
-            elif name == 'prev':
-                target = self._parse_unary()
-                return ast.Prev(loc, target)
-            else:
-                raise ParseError(f"Unknown @ operator: {name}", loc)
-
-        # Identifier
-        if self._at(TokenType.ID):
-            name = self._advance().value
-            return ast.Identifier(loc, name)
-
-        raise ParseError("Expected expression", loc)
-
-    def _parse_postfix_continue(self, expr: ast.Expression) -> ast.Expression:
-        """Continue parsing postfix expressions from an existing expression."""
-        while True:
-            loc = self._location()
-
-            # Function call
-            if self._match(TokenType.LPAREN):
-                args = []
-                if not self._at(TokenType.RPAREN):
-                    args.append(self._parse_expression())
-                    while self._match(TokenType.COMMA):
-                        args.append(self._parse_expression())
-                self._expect(TokenType.RPAREN, "Expected ')'")
-                expr = ast.Call(loc, expr, args)
-
-            # Array subscript
-            elif self._match(TokenType.LBRACKET):
-                index = self._parse_expression()
-                self._expect(TokenType.RBRACKET, "Expected ']'")
-                expr = ast.ArrayAccess(loc, expr, index)
-
-            # Field access
-            elif self._match(TokenType.DOT):
-                field = self._expect(TokenType.ID, "Expected field name").value
-                expr = ast.FieldAccess(loc, expr, field)
-
-            else:
-                break
-
-        return expr
-
-    def _parse_postfix(self) -> ast.Expression:
-        """Parse postfix expressions (calls, subscripts, field access)."""
-        expr = self._parse_primary()
-        return self._parse_postfix_continue(expr)
-
-    def _parse_unary(self) -> ast.Expression:
-        """Parse unary expressions."""
-        loc = self._location()
-
-        # Address-of
-        if self._match(TokenType.AMPERSAND):
-            return ast.AddressOf(loc, self._parse_unary())
-
-        # Unary minus
-        if self._match(TokenType.MINUS):
-            return ast.UnaryOp(loc, '-', self._parse_unary())
-
-        # Bitwise not
-        if self._match(TokenType.TILDE):
-            return ast.UnaryOp(loc, '~', self._parse_unary())
-
-        # Logical not
-        if self._match(TokenType.NOT):
-            return ast.NotOp(loc, self._parse_unary())
-
-        return self._parse_postfix()
-
-    def _parse_cast(self) -> ast.Expression:
-        """Parse cast expressions."""
-        expr = self._parse_unary()
-
-        while self._match(TokenType.AS):
-            loc = self._location()
-            target_type = self._parse_type()
-            expr = ast.Cast(loc, expr, target_type)
-
-        return expr
-
-    def _parse_multiplicative(self) -> ast.Expression:
-        """Parse multiplicative expressions."""
-        left = self._parse_cast()
-
-        while self._at(TokenType.STAR, TokenType.SLASH, TokenType.PERCENT):
-            loc = self._location()
-            op = self._advance().value
-            right = self._parse_cast()
-            left = ast.BinaryOp(loc, op, left, right)
-
-        return left
-
-    def _parse_additive(self) -> ast.Expression:
-        """Parse additive expressions."""
-        left = self._parse_multiplicative()
-
-        while self._at(TokenType.PLUS, TokenType.MINUS):
-            loc = self._location()
-            op = self._advance().value
-            right = self._parse_multiplicative()
-            left = ast.BinaryOp(loc, op, left, right)
-
-        return left
-
-    def _parse_shift(self) -> ast.Expression:
-        """Parse shift expressions."""
-        left = self._parse_additive()
-
-        while self._at(TokenType.LSHIFT, TokenType.RSHIFT):
-            loc = self._location()
-            op = self._advance().value
-            right = self._parse_additive()
-            left = ast.BinaryOp(loc, op, left, right)
-
-        return left
-
-    def _parse_bitwise_and(self) -> ast.Expression:
-        """Parse bitwise AND expressions."""
-        left = self._parse_shift()
-
-        while self._match(TokenType.AMPERSAND):
-            loc = self._location()
-            right = self._parse_shift()
-            left = ast.BinaryOp(loc, '&', left, right)
-
-        return left
-
-    def _parse_bitwise_xor(self) -> ast.Expression:
-        """Parse bitwise XOR expressions."""
-        left = self._parse_bitwise_and()
-
-        while self._match(TokenType.CARET):
-            loc = self._location()
-            right = self._parse_bitwise_and()
-            left = ast.BinaryOp(loc, '^', left, right)
-
-        return left
-
-    def _parse_bitwise_or(self) -> ast.Expression:
-        """Parse bitwise OR expressions."""
-        left = self._parse_bitwise_xor()
-
-        while self._match(TokenType.PIPE):
-            loc = self._location()
-            right = self._parse_bitwise_xor()
-            left = ast.BinaryOp(loc, '|', left, right)
-
-        return left
-
-    def _parse_comparison(self) -> ast.Expression:
-        """Parse comparison expressions."""
-        left = self._parse_bitwise_or()
-
-        if self._at(TokenType.EQ, TokenType.NE, TokenType.LT,
-                    TokenType.LE, TokenType.GT, TokenType.GE):
-            loc = self._location()
-            op = self._advance().value
-            right = self._parse_bitwise_or()
-            return ast.Comparison(loc, op, left, right)
-
-        return left
-
-    def _parse_logical_not(self) -> ast.Expression:
-        """Parse logical NOT expressions."""
-        if self._match(TokenType.NOT):
-            loc = self._location()
-            return ast.NotOp(loc, self._parse_logical_not())
-        return self._parse_comparison()
-
-    def _parse_logical_and(self) -> ast.Expression:
-        """Parse logical AND expressions."""
-        left = self._parse_logical_not()
-
-        while self._match(TokenType.AND):
-            loc = self._location()
-            right = self._parse_logical_not()
-            left = ast.LogicalOp(loc, 'and', left, right)
-
-        return left
-
-    def _parse_logical_or(self) -> ast.Expression:
-        """Parse logical OR expressions."""
-        left = self._parse_logical_and()
-
-        while self._match(TokenType.OR):
-            loc = self._location()
-            right = self._parse_logical_and()
-            left = ast.LogicalOp(loc, 'or', left, right)
-
-        return left
-
-    def _parse_expression(self) -> ast.Expression:
-        """Parse an expression."""
-        return self._parse_logical_or()
-
-    # Statement parsing
-
-    def _parse_block(self, end_keywords: List[str]) -> List[ast.Statement]:
-        """Parse statements until one of the end keywords."""
-        stmts = []
-        while True:
-            # Check for 'end' token
-            if self._at(TokenType.END):
-                break
-            # Check for keyword IDs like 'elseif', 'else', 'when'
-            if self.current.type == TokenType.ELSEIF or self.current.type == TokenType.ELSE:
-                break
-            if self.current.type == TokenType.WHEN:
-                break
-            if self.current.type == TokenType.ID and self.current.value in end_keywords:
-                break
-            if self._at(TokenType.EOF):
-                raise ParseError(f"Expected one of: {end_keywords}", self._location())
-            stmts.append(self._parse_statement())
-        return stmts
-
-    def _parse_var_decl(self) -> ast.VarDecl:
-        """Parse variable declaration."""
-        loc = self._location()
-        self._expect(TokenType.VAR, "Expected 'var'")
-
-        name = self._expect(TokenType.ID, "Expected variable name").value
-
-        var_type = None
-        init = None
-
-        if self._match(TokenType.COLON):
-            var_type = self._parse_type()
-
-        if self._match(TokenType.ASSIGN):
-            init = self._parse_expression()
-
-        self._match(TokenType.SEMICOLON)
-        return ast.VarDecl(loc, name, var_type, init)
-
-    def _parse_const_decl(self) -> ast.ConstDecl:
-        """Parse constant declaration."""
-        loc = self._location()
-        self._expect(TokenType.CONST, "Expected 'const'")
-
-        name = self._expect(TokenType.ID, "Expected constant name").value
-        self._expect(TokenType.ASSIGN, "Expected ':=' in const declaration")
-        value = self._parse_expression()
-
-        self._match(TokenType.SEMICOLON)
-        return ast.ConstDecl(loc, name, value)
-
-    def _parse_if(self) -> ast.IfStmt:
-        """Parse if statement."""
-        loc = self._location()
-        self._expect(TokenType.IF, "Expected 'if'")
-
-        condition = self._parse_expression()
-        self._expect(TokenType.THEN, "Expected 'then'")
-
-        then_body = self._parse_block(['elseif', 'else', 'end'])
-
-        elseifs = []
-        while self._at(TokenType.ELSEIF):
-            self._advance()
-            elif_cond = self._parse_expression()
-            self._expect(TokenType.THEN, "Expected 'then'")
-            elif_body = self._parse_block(['elseif', 'else', 'end'])
-            elseifs.append((elif_cond, elif_body))
-
-        else_body = None
-        if self._match(TokenType.ELSE):
-            else_body = self._parse_block(['end'])
-
-        self._expect(TokenType.END, "Expected 'end'")
-        self._expect(TokenType.IF, "Expected 'if' after 'end'")
-        self._match(TokenType.SEMICOLON)
-
-        return ast.IfStmt(loc, condition, then_body, elseifs, else_body)
-
-    def _parse_while(self) -> ast.WhileStmt:
-        """Parse while loop."""
-        loc = self._location()
-        self._expect(TokenType.WHILE, "Expected 'while'")
-
-        condition = self._parse_expression()
-        self._expect(TokenType.LOOP, "Expected 'loop'")
-        self._match(TokenType.SEMICOLON)  # Optional semicolon after loop
-
-        body = self._parse_block(['end'])
-        self._expect(TokenType.END, "Expected 'end'")
-        self._expect(TokenType.LOOP, "Expected 'loop'")
-        self._match(TokenType.SEMICOLON)
-
-        return ast.WhileStmt(loc, condition, body)
-
-    def _parse_loop(self) -> ast.LoopStmt:
-        """Parse infinite loop."""
-        loc = self._location()
-        self._expect(TokenType.LOOP, "Expected 'loop'")
-        self._match(TokenType.SEMICOLON)  # Optional semicolon after loop
-
-        body = self._parse_block(['end'])
-        self._expect(TokenType.END, "Expected 'end'")
-        self._expect(TokenType.LOOP, "Expected 'loop'")
-        self._match(TokenType.SEMICOLON)
-
-        return ast.LoopStmt(loc, body)
-
-    def _parse_case(self) -> ast.CaseStmt:
-        """Parse case statement."""
-        loc = self._location()
-        self._expect(TokenType.CASE, "Expected 'case'")
-
-        expr = self._parse_expression()
-        self._expect(TokenType.IS, "Expected 'is'")
-
-        whens = []
-        else_body = None
-
-        while self._match(TokenType.WHEN):
-            if self._at(TokenType.ELSE) or self._at_keyword('else'):
-                self._advance()
-                self._expect(TokenType.COLON, "Expected ':'")
-                else_body = self._parse_block(['when', 'end'])
-            else:
-                values = [self._parse_expression()]
-                while self._match(TokenType.COMMA):
-                    values.append(self._parse_expression())
-                self._expect(TokenType.COLON, "Expected ':'")
-                body = self._parse_block(['when', 'end'])
-                whens.append((values, body))
-
-        self._expect(TokenType.END, "Expected 'end'")
-        self._expect(TokenType.CASE, "Expected 'case' after 'end'")
-        self._match(TokenType.SEMICOLON)
-
-        return ast.CaseStmt(loc, expr, whens, else_body)
-
-    def _parse_return(self) -> ast.ReturnStmt:
-        """Parse return statement."""
-        loc = self._location()
-        self._expect(TokenType.RETURN, "Expected 'return'")
-        self._match(TokenType.SEMICOLON)
-        return ast.ReturnStmt(loc)
-
-    def _parse_break(self) -> ast.BreakStmt:
-        """Parse break statement."""
-        loc = self._location()
-        self._expect(TokenType.BREAK, "Expected 'break'")
-        self._match(TokenType.SEMICOLON)
-        return ast.BreakStmt(loc)
-
-    def _parse_continue(self) -> ast.ContinueStmt:
-        """Parse continue statement."""
-        loc = self._location()
-        self._expect(TokenType.CONTINUE, "Expected 'continue'")
-        self._match(TokenType.SEMICOLON)
-        return ast.ContinueStmt(loc)
-
-    def _parse_asm(self) -> ast.AsmStmt:
-        """Parse inline assembly."""
-        loc = self._location()
-        self._expect(TokenType.AT, "Expected '@'")
-        self._expect_keyword('asm')
-
-        parts = []
-        # First part is always a string
-        parts.append(self._expect(TokenType.STRING, "Expected assembly string").value)
-
-        while self._match(TokenType.COMMA):
-            if self._at(TokenType.STRING):
-                parts.append(self._advance().value)
-            else:
-                parts.append(self._parse_expression())
-
-        self._match(TokenType.SEMICOLON)
-        return ast.AsmStmt(loc, parts)
-
-    def _parse_assignment_or_call(self) -> ast.Statement:
-        """Parse assignment or expression statement."""
-        loc = self._location()
-
-        # Check for multi-assignment: (a, b) := call()
-        # Or indirect call: (expr)(args)
-        if self._match(TokenType.LPAREN):
-            targets = [self._parse_expression()]
-            while self._match(TokenType.COMMA):
-                targets.append(self._parse_expression())
-            self._expect(TokenType.RPAREN)
-
-            # If we see ':=', this is multi-assignment
-            if self._match(TokenType.ASSIGN):
-                value = self._parse_expression()
-                self._match(TokenType.SEMICOLON)
-                if not isinstance(value, ast.Call):
-                    raise ParseError("Multi-assignment requires a call", value.location)
-                return ast.MultiAssignment(loc, targets, value)
-
-            # Otherwise, this is a parenthesized expression (possibly a call)
-            # Reconstruct and continue parsing as postfix/expression
-            if len(targets) != 1:
-                raise ParseError("Expected ':=' after tuple", loc)
-            expr = targets[0]
-            # Continue parsing postfix operations (call, subscript, field access)
-            expr = self._parse_postfix_continue(expr)
-            if self._match(TokenType.ASSIGN):
-                value = self._parse_expression()
-                self._match(TokenType.SEMICOLON)
-                return ast.Assignment(loc, expr, value)
-            self._match(TokenType.SEMICOLON)
-            return ast.ExprStmt(loc, expr)
-
-        # Regular expression/assignment
-        expr = self._parse_expression()
-
-        if self._match(TokenType.ASSIGN):
-            value = self._parse_expression()
-            self._match(TokenType.SEMICOLON)
-            return ast.Assignment(loc, expr, value)
-
-        self._match(TokenType.SEMICOLON)
-        return ast.ExprStmt(loc, expr)
-
-    def _parse_statement(self) -> ast.Statement:
-        """Parse a statement."""
-        # Declarations that can appear in statement context
-        if self._at(TokenType.VAR):
-            return self._parse_var_decl()
-        if self._at(TokenType.CONST):
-            return self._parse_const_decl()
-
-        # Control flow
-        if self._at(TokenType.IF):
-            return self._parse_if()
-        if self._at(TokenType.WHILE):
-            return self._parse_while()
-        if self._at(TokenType.CASE):
-            return self._parse_case()
-        if self._at(TokenType.RETURN):
-            return self._parse_return()
-        if self._at(TokenType.BREAK):
-            return self._parse_break()
-        if self._at(TokenType.CONTINUE):
-            return self._parse_continue()
-
-        # Keyword-triggered statements
-        if self._at(TokenType.LOOP):
-            return self._parse_loop()
-
-        # Inline assembly
-        if self._at(TokenType.AT):
-            next_tok = self._peek_next()
-            if next_tok.type == TokenType.ID and next_tok.value == 'asm':
-                return self._parse_asm()
-
-        # Nested subroutine
-        if self._at(TokenType.SUB):
-            loc = self._location()
-            sub = self._parse_sub()
-            return ast.NestedSubStmt(loc, sub)
-
-        # Local interface definition
-        if self._at(TokenType.INTERFACE):
-            return self._parse_interface()
-
-        # Assignment or call
-        return self._parse_assignment_or_call()
-
-    # Declaration parsing
-
-    def _parse_parameter_list(self) -> Tuple[List[ast.Parameter], List[ast.Parameter]]:
-        """Parse subroutine parameters and returns."""
-        params = []
-        returns = []
-
-        self._expect(TokenType.LPAREN, "Expected '('")
-
-        if not self._at(TokenType.RPAREN):
-            # First parameter
-            name = self._expect(TokenType.ID, "Expected parameter name").value
-            self._expect(TokenType.COLON, "Expected ':'")
-            ptype = self._parse_type()
-            params.append(ast.Parameter(self._location(), name, ptype))
-
-            while self._match(TokenType.COMMA):
-                name = self._expect(TokenType.ID, "Expected parameter name").value
-                self._expect(TokenType.COLON, "Expected ':'")
-                ptype = self._parse_type()
-                params.append(ast.Parameter(self._location(), name, ptype))
-
-        self._expect(TokenType.RPAREN, "Expected ')'")
-
-        # Return parameters
-        if self._match(TokenType.COLON):
-            self._expect(TokenType.LPAREN, "Expected '('")
-
-            name = self._expect(TokenType.ID, "Expected return parameter name").value
-            self._expect(TokenType.COLON, "Expected ':'")
-            rtype = self._parse_type()
-            returns.append(ast.Parameter(self._location(), name, rtype))
-
-            while self._match(TokenType.COMMA):
-                name = self._expect(TokenType.ID, "Expected return parameter name").value
-                self._expect(TokenType.COLON, "Expected ':'")
-                rtype = self._parse_type()
-                returns.append(ast.Parameter(self._location(), name, rtype))
-
-            self._expect(TokenType.RPAREN, "Expected ')'")
-
-        return params, returns
-
-    def _parse_sub(self, is_decl: bool = False, is_impl: bool = False) -> ast.SubDecl:
-        """Parse subroutine declaration."""
-        loc = self._location()
-        self._expect(TokenType.SUB, "Expected 'sub'")
-
-        name = self._expect(TokenType.ID, "Expected subroutine name").value
-
-        # For @impl, parameters come from the declaration
-        if is_impl:
-            params = []
-            returns = []
+            self._source = str(lexer_or_source)
+            self._filename = "<input>"
+
+    def parse(self) -> _ast.Program:
+        return parse_string(self._source, self._filename)
+
+
+# =============================================================================
+# Translation: v3 AST -> ucow ast.py classes
+# =============================================================================
+
+
+def _translate(v3: Any, filename: str) -> _ast.Program:
+    """Top-level entry: translate the v3 Program into ucow's Program."""
+    assert isinstance(v3, _ucg.Program), f"expected Program, got {type(v3).__name__}"
+    loc = _loc(filename, v3)
+    declarations: list[_ast.Declaration] = []
+    statements: list[_ast.Statement] = []
+    for item in v3.items:
+        tx = _translate_top_item(item, filename)
+        if tx is None:
+            continue
+        if isinstance(tx, _ast.Declaration):
+            declarations.append(tx)
+        elif isinstance(tx, _ast.Statement):
+            statements.append(tx)
         else:
-            # Parameter list is optional for interface implementations
-            if self._at(TokenType.LPAREN):
-                params, returns = self._parse_parameter_list()
-            else:
-                params = []
-                returns = []
+            raise ParseError(
+                f"internal: unrecognised top-level item type {type(tx).__name__}",
+                _loc(filename, item),
+            )
+    return _ast.Program(location=loc, declarations=declarations, statements=statements)
 
-        extern_name = None
-        implements = None
 
-        # Parse attributes
-        while self._at(TokenType.AT):
-            self._advance()
-            attr = self._expect(TokenType.ID, "Expected attribute name").value
+# ---- Location helper --------------------------------------------------------
 
-            if attr == 'extern':
-                self._expect(TokenType.LPAREN, "Expected '('")
-                extern_name = self._expect(TokenType.STRING, "Expected extern name").value
-                self._expect(TokenType.RPAREN, "Expected ')'")
-            else:
-                raise ParseError(f"Unknown attribute: {attr}", self._location())
 
-        # implements clause
-        if self._match(TokenType.IMPLEMENTS):
-            implements = self._expect(TokenType.ID, "Expected interface name").value
+def _loc(filename: str, v3_node: Any) -> SourceLocation:
+    """Pull a SourceLocation off a v3 AST node (or a parse-tree Token)."""
+    pos = getattr(v3_node, "pos", None)
+    if pos is not None:
+        return SourceLocation(filename, pos.start_line or 1, pos.start_column or 1)
+    line = getattr(v3_node, "line", None)
+    col = getattr(v3_node, "column", None)
+    if line is not None:
+        return SourceLocation(filename, line, col or 1)
+    return SourceLocation(filename, 1, 1)
 
+
+# ---- Top-level dispatch -----------------------------------------------------
+
+
+def _translate_top_item(item: Any, filename: str) -> Optional[Any]:
+    """A top-level item dispatches to a Declaration or Statement."""
+    if isinstance(item, _ucg.IncludeDecl):
+        return _ast.IncludeDecl(
+            location=_loc(filename, item),
+            path=_unquote_string(item.path.text),
+        )
+    if isinstance(item, _ucg.RecordDecl):
+        return _translate_record_decl(item, filename)
+    if isinstance(item, _ucg.TypedefDecl):
+        return _ast.TypedefDecl(
+            location=_loc(filename, item),
+            name=item.name.text,
+            type=_translate_type(item.type, filename),
+        )
+    if isinstance(item, _ucg.InterfaceDecl):
+        return _translate_interface_decl(item, filename)
+    if isinstance(item, (_ucg.SubDecl, _ucg.SubForwardDecl, _ucg.SubImpl)):
+        return _translate_sub(item, filename)
+    return _translate_statement(item, filename)
+
+
+def _translate_record_decl(rec: Any, filename: str) -> _ast.RecordDecl:
+    fields: list[_ast.RecordField] = []
+    for f in rec.fields:
+        fields.append(_translate_record_field(f, filename))
+    record_type = _ast.RecordType(
+        location=_loc(filename, rec),
+        name=rec.name.text,
+        fields=fields,
+        base=rec.base.text if rec.base is not None else None,
+    )
+    return _ast.RecordDecl(location=_loc(filename, rec), record=record_type)
+
+
+def _translate_record_field(f: Any, filename: str) -> _ast.RecordField:
+    return _ast.RecordField(
+        location=_loc(filename, f),
+        name=f.name.text,
+        type=_translate_type(f.type, filename),
+        offset=int(f.offset.text) if f.offset is not None else None,
+    )
+
+
+def _translate_interface_decl(iface: Any, filename: str) -> _ast.InterfaceDecl:
+    params: list[_ast.Parameter] = []
+    if iface.params is not None:
+        for p in iface.params:
+            params.append(_translate_parameter(p, filename))
+    returns: list[_ast.Parameter] = []
+    if iface.returns is not None:
+        for r in iface.returns:
+            returns.append(_translate_parameter(r, filename))
+    itype = _ast.InterfaceType(
+        location=_loc(filename, iface),
+        name=iface.name.text,
+        params=params,
+        returns=returns,
+    )
+    return _ast.InterfaceDecl(location=_loc(filename, iface), interface=itype)
+
+
+def _translate_parameter(p: Any, filename: str) -> _ast.Parameter:
+    return _ast.Parameter(
+        location=_loc(filename, p),
+        name=p.name.text,
+        type=_translate_type(p.type, filename),
+    )
+
+
+def _translate_sub(sub: Any, filename: str) -> _ast.SubDecl:
+    """Collapse the v3 SubDecl/SubForwardDecl/SubImpl trio into ucow's SubDecl."""
+    loc = _loc(filename, sub)
+
+    name = sub.name.text
+    attrs = list(sub.attrs) if hasattr(sub, "attrs") and sub.attrs else []
+    extern_name: Optional[str] = None
+    for attr in attrs:
+        if isinstance(attr, _ucg.ExternAttr):
+            extern_name = _unquote_string(attr.name.text)
+
+    implements: Optional[str] = None
+    if getattr(sub, "implements", None) is not None:
+        implements = sub.implements.text
+
+    # Params/returns come from the signature on SubDecl/SubForwardDecl;
+    # SubImpl inherits from its matching @decl, so we leave them empty
+    # and let downstream resolution fill them.
+    params: list[_ast.Parameter] = []
+    returns: list[_ast.Parameter] = []
+    sig = getattr(sub, "sig", None)
+    if sig is not None:
+        if sig.params is not None:
+            for p in sig.params:
+                params.append(_translate_parameter(p, filename))
+        if sig.returns is not None:
+            for r in sig.returns:
+                returns.append(_translate_parameter(r, filename))
+
+    body: Optional[list[_ast.Statement]]
+    is_decl = False
+    is_impl = False
+    if isinstance(sub, _ucg.SubForwardDecl):
         body = None
-        if is_decl:
-            # Forward declaration ends with semicolon
-            self._match(TokenType.SEMICOLON)
-        elif self._match(TokenType.IS):
-            # Has a body
-            body = []
-            while not self._at(TokenType.END):
-                if self._at(TokenType.EOF):
-                    raise ParseError("Expected 'end sub'", self._location())
-                # Handle nested declarations
-                if self._at(TokenType.SUB):
-                    body.append(self._parse_sub())
-                elif self._at(TokenType.RECORD):
-                    body.append(self._parse_record())
-                elif self._at(TokenType.TYPEDEF):
-                    body.append(self._parse_typedef())
-                elif self._at(TokenType.AT):
-                    # Could be @decl, @impl, or @asm
-                    next_tok = self._peek_next()
-                    if next_tok.type == TokenType.ID:
-                        if next_tok.value == 'decl':
-                            self._advance()  # @
-                            self._advance()  # decl
-                            body.append(self._parse_sub(is_decl=True))
-                        elif next_tok.value == 'impl':
-                            self._advance()  # @
-                            self._advance()  # impl
-                            body.append(self._parse_sub(is_impl=True))
-                        elif next_tok.value == 'asm':
-                            body.append(self._parse_asm())
-                        else:
-                            body.append(self._parse_statement())
-                    else:
-                        body.append(self._parse_statement())
-                else:
-                    body.append(self._parse_statement())
+        is_decl = True
+    elif isinstance(sub, _ucg.SubImpl):
+        body = _translate_stmt_list(sub.body, filename)
+        is_impl = True
+    else:  # SubDecl
+        tail = sub.tail
+        if isinstance(tail, _ucg.SubBody):
+            body = _translate_stmt_list(tail.body, filename)
+        else:  # SubExternal — no body
+            body = None
 
-            self._expect(TokenType.END, "Expected 'end'")
-            self._expect(TokenType.SUB, "Expected 'sub' after 'end'")
-            self._match(TokenType.SEMICOLON)
-        else:
-            # External declaration with no body
-            self._match(TokenType.SEMICOLON)
+    return _ast.SubDecl(
+        location=loc,
+        name=name,
+        params=params,
+        returns=returns,
+        body=body,
+        extern_name=extern_name,
+        implements=implements,
+        is_decl=is_decl,
+        is_impl=is_impl,
+    )
 
-        return ast.SubDecl(loc, name, params, returns, body,
-                          extern_name, implements, is_decl, is_impl)
 
-    def _parse_record(self) -> ast.RecordDecl:
-        """Parse record declaration."""
-        loc = self._location()
-        self._expect(TokenType.RECORD, "Expected 'record'")
+def _translate_stmt_list(items: Any, filename: str) -> list[_ast.Statement]:
+    """Map a v3 list of statement-like items (sub_body_item) to ucow Statements."""
+    out: list[_ast.Statement] = []
+    if items is None:
+        return out
+    for v in items:
+        tx = _translate_stmt_or_nested(v, filename)
+        if tx is not None:
+            out.append(tx)
+    return out
 
-        name = self._expect(TokenType.ID, "Expected record name").value
 
-        base = None
-        if self._match(TokenType.COLON):
-            base = self._expect(TokenType.ID, "Expected base record name").value
+def _translate_stmt_or_nested(v: Any, filename: str) -> Optional[_ast.Statement]:
+    """A sub_body_item is either a stmt, a sub_form (nested), or an interface decl."""
+    if isinstance(v, (_ucg.SubDecl, _ucg.SubForwardDecl, _ucg.SubImpl)):
+        return _ast.NestedSubStmt(
+            location=_loc(filename, v),
+            sub=_translate_sub(v, filename),
+        )
+    if isinstance(v, _ucg.InterfaceDecl):
+        # No NestedInterfaceStmt in ucow; the pre-uplox parser also
+        # admitted nested interface decls but downstream rarely uses
+        # them. Emit a marker-style NestedSubStmt with sub=None as the
+        # closest match; consumers that don't expect it will fail loudly.
+        return _ast.NestedSubStmt(
+            location=_loc(filename, v),
+            sub=None,  # type: ignore[arg-type]
+        )
+    return _translate_statement(v, filename)
 
-        self._expect(TokenType.IS, "Expected 'is'")
 
-        fields = []
-        while not self._at(TokenType.END):
-            if self._at(TokenType.EOF):
-                raise ParseError("Expected 'end record'", self._location())
+# ---- Statements -------------------------------------------------------------
 
-            field_loc = self._location()
-            field_name = self._expect(TokenType.ID, "Expected field name").value
 
-            # Optional @at() for explicit offset
-            offset = None
-            if self._match(TokenType.AT):
-                # Support both @(n) and @at(n) syntax
-                if self._at(TokenType.ID) and self.current.value == 'at':
-                    self._advance()  # consume 'at'
-                self._expect(TokenType.LPAREN, "Expected '('")
-                offset = self._expect(TokenType.NUMBER, "Expected offset").value
-                self._expect(TokenType.RPAREN, "Expected ')'")
-
-            self._expect(TokenType.COLON, "Expected ':'")
-            field_type = self._parse_type()
-            self._match(TokenType.SEMICOLON)
-
-            fields.append(ast.RecordField(field_loc, field_name, field_type, offset))
-
-        self._expect(TokenType.END, "Expected 'end'")
-        self._expect(TokenType.RECORD, "Expected 'record' after 'end'")
-        self._match(TokenType.SEMICOLON)
-
-        record_type = ast.RecordType(loc, name, fields, base)
-        return ast.RecordDecl(loc, record_type)
-
-    def _parse_typedef(self) -> ast.TypedefDecl:
-        """Parse typedef declaration."""
-        loc = self._location()
-        self._expect(TokenType.TYPEDEF, "Expected 'typedef'")
-
-        name = self._expect(TokenType.ID, "Expected type name").value
-        self._expect(TokenType.IS, "Expected 'is'")
-        type_def = self._parse_type()
-        self._match(TokenType.SEMICOLON)
-
-        return ast.TypedefDecl(loc, name, type_def)
-
-    def _parse_interface(self) -> ast.InterfaceDecl:
-        """Parse interface declaration."""
-        loc = self._location()
-        self._expect(TokenType.INTERFACE, "Expected 'interface'")
-
-        name = self._expect(TokenType.ID, "Expected interface name").value
-        params, returns = self._parse_parameter_list()
-        self._match(TokenType.SEMICOLON)
-
-        interface = ast.InterfaceType(loc, name, params, returns)
-        return ast.InterfaceDecl(loc, interface)
-
-    def _parse_include(self) -> ast.IncludeDecl:
-        """Parse include directive."""
-        loc = self._location()
-        self._expect(TokenType.INCLUDE, "Expected 'include'")
-        path = self._expect(TokenType.STRING, "Expected include path").value
-        self._match(TokenType.SEMICOLON)
-        return ast.IncludeDecl(loc, path)
-
-    def parse(self) -> ast.Program:
-        """Parse the entire program."""
-        loc = self._location()
-        declarations = []
-        statements = []
-
-        while not self._at(TokenType.EOF):
-            # Top-level declarations
-            if self._at(TokenType.INCLUDE):
-                declarations.append(self._parse_include())
-            elif self._at(TokenType.SUB):
-                declarations.append(self._parse_sub())
-            elif self._at(TokenType.RECORD):
-                declarations.append(self._parse_record())
-            elif self._at(TokenType.TYPEDEF):
-                declarations.append(self._parse_typedef())
-            elif self._at(TokenType.INTERFACE):
-                declarations.append(self._parse_interface())
-            elif self._at(TokenType.AT):
-                # @decl or @impl
-                next_tok = self._peek_next()
-                if next_tok.type == TokenType.ID:
-                    if next_tok.value == 'decl':
-                        self._advance()  # @
-                        self._advance()  # decl
-                        declarations.append(self._parse_sub(is_decl=True))
-                    elif next_tok.value == 'impl':
-                        self._advance()  # @
-                        self._advance()  # impl
-                        declarations.append(self._parse_sub(is_impl=True))
-                    else:
-                        # Top-level statement starting with @
-                        statements.append(self._parse_statement())
-                else:
-                    statements.append(self._parse_statement())
+def _translate_statement(s: Any, filename: str) -> _ast.Statement:
+    loc = _loc(filename, s)
+    if isinstance(s, _ucg.VarDecl):
+        return _ast.VarDecl(
+            location=loc,
+            name=s.name.text,
+            type=_translate_type(s.type, filename) if s.type is not None else None,
+            init=_translate_expression(s.init, filename) if s.init is not None else None,
+        )
+    if isinstance(s, _ucg.ConstDecl):
+        return _ast.ConstDecl(
+            location=loc, name=s.name.text, value=_translate_expression(s.value, filename)
+        )
+    if isinstance(s, _ucg.ReturnStmt):
+        return _ast.ReturnStmt(location=loc)
+    if isinstance(s, _ucg.BreakStmt):
+        return _ast.BreakStmt(location=loc)
+    if isinstance(s, _ucg.ContinueStmt):
+        return _ast.ContinueStmt(location=loc)
+    if isinstance(s, _ucg.IfStmt):
+        elseifs: list[tuple] = []
+        for clause in s.elseifs:
+            elseifs.append(
+                (
+                    _translate_expression(clause.cond, filename),
+                    _translate_stmt_list(clause.body, filename),
+                )
+            )
+        else_body: Optional[list[_ast.Statement]] = None
+        if s.otherwise is not None:
+            else_body = _translate_stmt_list(s.otherwise, filename)
+        return _ast.IfStmt(
+            location=loc,
+            condition=_translate_expression(s.cond, filename),
+            then_body=_translate_stmt_list(s.then_body, filename),
+            elseifs=elseifs,
+            else_body=else_body,
+        )
+    if isinstance(s, _ucg.WhileStmt):
+        return _ast.WhileStmt(
+            location=loc,
+            condition=_translate_expression(s.cond, filename),
+            body=_translate_stmt_list(s.body, filename),
+        )
+    if isinstance(s, _ucg.LoopStmt):
+        return _ast.LoopStmt(location=loc, body=_translate_stmt_list(s.body, filename))
+    if isinstance(s, _ucg.CaseStmt):
+        whens: list[tuple] = []
+        else_body: Optional[list[_ast.Statement]] = None
+        for arm in s.arms:
+            if isinstance(arm, _ucg.CaseElse):
+                else_body = _translate_stmt_list(arm.body, filename)
+            else:  # CaseArm
+                values = [_translate_expression(v, filename) for v in arm.values]
+                body = _translate_stmt_list(arm.body, filename)
+                whens.append((values, body))
+        return _ast.CaseStmt(
+            location=loc,
+            expr=_translate_expression(s.subject, filename),
+            whens=whens,
+            else_body=else_body,
+        )
+    if isinstance(s, _ucg.Assignment):
+        return _ast.Assignment(
+            location=loc,
+            target=_translate_expression(s.target, filename),
+            value=_translate_expression(s.value, filename),
+        )
+    if isinstance(s, _ucg.MultiAssignment):
+        targets = [_translate_expression(t, filename) for t in s.targets]
+        value = _translate_expression(s.value, filename)
+        if not isinstance(value, _ast.Call):
+            raise ParseError(
+                "Multi-assignment requires a call",
+                _loc(filename, s.value) if s.value is not None else loc,
+            )
+        return _ast.MultiAssignment(location=loc, targets=targets, value=value)
+    if isinstance(s, _ucg.ExprStmt):
+        return _ast.ExprStmt(location=loc, expr=_translate_expression(s.expr, filename))
+    if isinstance(s, _ucg.AsmStmt):
+        # ucow's asm parts list alternates str and Expression. The leading
+        # token is always a literal (the first piece of asm text); the
+        # rest come from `more` and may be string literals or expressions.
+        parts: list[Union[str, _ast.Expression]] = []
+        parts.append(_unquote_string(s.first.text))
+        for expr in s.more:
+            tx = _translate_expression(expr, filename)
+            if isinstance(tx, _ast.StringLiteral):
+                parts.append(tx.value)
             else:
-                # Top-level statement
-                statements.append(self._parse_statement())
-
-        return ast.Program(loc, declarations, statements)
-
-
-def parse_file(filename: str) -> ast.Program:
-    """Parse a file and return the AST."""
-    with open(filename, 'r') as f:
-        source = f.read()
-    lexer = Lexer(source, filename)
-    parser = Parser(lexer)
-    return parser.parse()
+                parts.append(tx)
+        return _ast.AsmStmt(location=loc, parts=parts)
+    raise ParseError(
+        f"internal: cannot translate statement of kind {type(s).__name__}", loc
+    )
 
 
-def parse_string(source: str, filename: str = "<input>") -> ast.Program:
-    """Parse a string and return the AST."""
-    lexer = Lexer(source, filename)
-    parser = Parser(lexer)
-    return parser.parse()
+# ---- Expressions ------------------------------------------------------------
+
+
+def _translate_expression(e: Any, filename: str) -> _ast.Expression:
+    loc = _loc(filename, e)
+    if isinstance(e, _ucg.NumberLiteral):
+        return _ast.NumberLiteral(location=loc, value=_parse_number(e.value.text))
+    if isinstance(e, _ucg.StringLiteral):
+        return _ast.StringLiteral(location=loc, value=_unquote_string(e.value.text))
+    if isinstance(e, _ucg.NilLiteral):
+        return _ast.NilLiteral(location=loc)
+    if isinstance(e, _ucg.Identifier):
+        return _ast.Identifier(location=loc, name=e.name.text)
+    if isinstance(e, _ucg.BinaryOp):
+        return _ast.BinaryOp(
+            location=loc,
+            op=e.op.text,
+            left=_translate_expression(e.lhs, filename),
+            right=_translate_expression(e.rhs, filename),
+        )
+    if isinstance(e, _ucg.LogicalOp):
+        return _ast.LogicalOp(
+            location=loc,
+            op=e.op.text,
+            left=_translate_expression(e.lhs, filename),
+            right=_translate_expression(e.rhs, filename),
+        )
+    if isinstance(e, _ucg.Comparison):
+        return _ast.Comparison(
+            location=loc,
+            op=e.op.text,
+            left=_translate_expression(e.lhs, filename),
+            right=_translate_expression(e.rhs, filename),
+        )
+    if isinstance(e, _ucg.NotOp):
+        return _ast.NotOp(location=loc, operand=_translate_expression(e.operand, filename))
+    if isinstance(e, _ucg.Cast):
+        return _ast.Cast(
+            location=loc,
+            expr=_translate_expression(e.target, filename),
+            target_type=_translate_type(e.type, filename),
+        )
+    # v3 splits unary forms per-keyword; ucow folds them into UnaryOp
+    # (and AddressOf, Dereference, etc as separate classes).
+    if isinstance(e, _ucg.Negate):
+        return _ast.UnaryOp(
+            location=loc, op="-", operand=_translate_expression(e.operand, filename)
+        )
+    if isinstance(e, _ucg.BitNot):
+        return _ast.UnaryOp(
+            location=loc, op="~", operand=_translate_expression(e.operand, filename)
+        )
+    if isinstance(e, _ucg.AddressOf):
+        return _ast.AddressOf(
+            location=loc, operand=_translate_expression(e.operand, filename)
+        )
+    if isinstance(e, _ucg.SizeOf):
+        return _ast.SizeOf(
+            location=loc, target=_translate_expression(e.operand, filename)
+        )
+    if isinstance(e, _ucg.BytesOf):
+        return _ast.BytesOf(
+            location=loc, target=_translate_expression(e.operand, filename)
+        )
+    if isinstance(e, _ucg.BytesOfType):
+        return _ast.BytesOf(location=loc, target=_translate_scalar_kind(e.scalar, filename))
+    if isinstance(e, _ucg.IndexOf):
+        return _ast.IndexOf(
+            location=loc, target=_translate_expression(e.operand, filename)
+        )
+    if isinstance(e, _ucg.Next):
+        return _ast.Next(
+            location=loc, pointer=_translate_expression(e.operand, filename)
+        )
+    if isinstance(e, _ucg.Prev):
+        return _ast.Prev(
+            location=loc, pointer=_translate_expression(e.operand, filename)
+        )
+    if isinstance(e, _ucg.Call):
+        # e.args is None for an empty arg list (the wrapper <arg_list_opt>'s
+        # empty alt). v3 Python emitter currently passes None through; the
+        # schema says list fields default to []. Defensively coalesce.
+        raw_args = e.args or []
+        return _ast.Call(
+            location=loc,
+            target=_translate_expression(e.callee, filename),
+            args=[_translate_expression(a, filename) for a in raw_args],
+        )
+    if isinstance(e, _ucg.ArrayAccess):
+        return _ast.ArrayAccess(
+            location=loc,
+            array=_translate_expression(e.array, filename),
+            index=_translate_expression(e.index, filename),
+        )
+    if isinstance(e, _ucg.FieldAccess):
+        return _ast.FieldAccess(
+            location=loc,
+            record=_translate_expression(e.record, filename),
+            field=e.field.text,
+        )
+    if isinstance(e, _ucg.ArrayInitializer):
+        return _ast.ArrayInitializer(
+            location=loc,
+            elements=[_translate_expression(x, filename) for x in (e.items or [])],
+        )
+    if isinstance(e, _ucg.Dereference):
+        return _ast.Dereference(
+            location=loc, pointer=_translate_expression(e.operand, filename)
+        )
+    raise ParseError(
+        f"internal: cannot translate expression of kind {type(e).__name__}", loc
+    )
+
+
+# ---- Types ------------------------------------------------------------------
+
+
+def _translate_type(t: Any, filename: str) -> _ast.Type:
+    """Translate a v3 Type (base + array_suffixes) into ucow's Type tree.
+
+    Each ``[N]`` suffix wraps the current type in an ``ArrayType``
+    outer-to-inner — so ``[uint8][5]`` becomes
+    ``ArrayType(PointerType(ScalarType('uint8')), size=5)``.
+    """
+    if t is None:
+        return None  # type: ignore[return-value]
+    assert isinstance(t, _ucg.Type), f"expected Type, got {type(t).__name__}"
+    base = _translate_base_type(t.base, filename)
+    for suffix in t.suffixes or []:
+        loc = _loc(filename, suffix)
+        if isinstance(suffix, _ucg.ArraySized):
+            size_expr = _translate_expression(suffix.size, filename)
+            base = _ast.ArrayType(location=loc, element=base, size=size_expr)
+        else:  # ArrayInferred
+            base = _ast.ArrayType(location=loc, element=base, size=None)
+    return base
+
+
+def _translate_base_type(b: Any, filename: str) -> _ast.Type:
+    loc = _loc(filename, b)
+    if isinstance(
+        b,
+        (
+            _ucg.Int8Type, _ucg.UInt8Type, _ucg.Int16Type, _ucg.UInt16Type,
+            _ucg.Int32Type, _ucg.UInt32Type, _ucg.IntPtrType,
+        ),
+    ):
+        return _translate_scalar_kind(b, filename)
+    if isinstance(b, _ucg.PointerType):
+        return _ast.PointerType(location=loc, target=_translate_type(b.target, filename))
+    if isinstance(b, _ucg.SizeOfType):
+        return _ast.SizeOfType(location=loc, target=b.target.text)
+    if isinstance(b, _ucg.IndexOfType):
+        return _ast.IndexOfType(location=loc, target=b.target.text)
+    if isinstance(b, _ucg.NamedType):
+        return _ast.NamedType(location=loc, name=b.name.text)
+    if isinstance(b, _ucg.RangedIntType):
+        return _ast.RangedIntType(
+            location=loc,
+            min_expr=_translate_expression(b.lo, filename),
+            max_expr=_translate_expression(b.hi, filename),
+        )
+    raise ParseError(
+        f"internal: cannot translate base_type of kind {type(b).__name__}", loc
+    )
+
+
+_SCALAR_NAMES = {
+    _ucg.Int8Type: "int8",
+    _ucg.UInt8Type: "uint8",
+    _ucg.Int16Type: "int16",
+    _ucg.UInt16Type: "uint16",
+    _ucg.Int32Type: "int32",
+    _ucg.UInt32Type: "uint32",
+    _ucg.IntPtrType: "intptr",
+}
+
+
+def _translate_scalar_kind(b: Any, filename: str) -> _ast.ScalarType:
+    name = _SCALAR_NAMES.get(type(b))
+    if name is None:
+        raise ParseError(
+            f"internal: not a scalar kind: {type(b).__name__}", _loc(filename, b)
+        )
+    return _ast.ScalarType(location=_loc(filename, b), name=name)
+
+
+# ---- Literal-text helpers ---------------------------------------------------
+
+
+def _parse_number(text: str) -> int:
+    """Parse a Cowgol numeric literal into an int.
+
+    Handles 0x / 0o / 0b / 0d prefixes, underscores within digit runs,
+    and single-quoted character literals (``'A'``, ``'\\n'``).
+    """
+    if not text:
+        raise ValueError("empty number literal")
+    if text[0] == "'":
+        body = text[1:-1]
+        if body.startswith("\\"):
+            ch = body[1]
+            return {"n": 10, "t": 9, "r": 13, "\\": 92, "'": 39, '"': 34, "0": 0}.get(
+                ch, ord(ch)
+            )
+        return ord(body)
+    flat = text.replace("_", "")
+    if flat.startswith(("0x", "0X")):
+        return int(flat[2:], 16)
+    if flat.startswith(("0o", "0O")):
+        return int(flat[2:], 8)
+    if flat.startswith(("0b", "0B")):
+        return int(flat[2:], 2)
+    if flat.startswith(("0d", "0D")):
+        return int(flat[2:], 10)
+    return int(flat, 10)
+
+
+def _unquote_string(text: str) -> str:
+    """Strip the surrounding double quotes and process backslash escapes."""
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        body = text[1:-1]
+    else:
+        body = text
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if c == "\\" and i + 1 < len(body):
+            esc = body[i + 1]
+            out.append(
+                {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'", '"': '"', "0": "\0"}.get(
+                    esc, esc
+                )
+            )
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
