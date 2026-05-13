@@ -501,14 +501,10 @@ def _translate_expression(e: Any, filename: str) -> _ast.Expression:
             location=loc, pointer=_translate_expression(e.operand, filename)
         )
     if isinstance(e, _ucg.Call):
-        # e.args is None for an empty arg list (the wrapper <arg_list_opt>'s
-        # empty alt). v3 Python emitter currently passes None through; the
-        # schema says list fields default to []. Defensively coalesce.
-        raw_args = e.args or []
         return _ast.Call(
             location=loc,
             target=_translate_expression(e.callee, filename),
-            args=[_translate_expression(a, filename) for a in raw_args],
+            args=[_translate_expression(a, filename) for a in e.args],
         )
     if isinstance(e, _ucg.ArrayAccess):
         return _ast.ArrayAccess(
