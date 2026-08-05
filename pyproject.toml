@@ -32,8 +32,8 @@ keywords = ["cowgol", "compiler", "8080", "z80", "cpm"]
 ucow = "src.main:main"
 
 [project.urls]
-Homepage = "https://github.com/davidgiven/ucow"
-Repository = "https://github.com/davidgiven/ucow"
+Homepage = "https://github.com/avwohl/ucow"
+Repository = "https://github.com/avwohl/ucow"
 
 [tool.hatch.version]
 path = "src/__init__.py"
