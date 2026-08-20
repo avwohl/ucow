@@ -6,12 +6,14 @@ import argparse
 from pathlib import Path
 from typing import List
 
-from .parser import Parser, ParseError, parse_file, parse_string, scan_tokens
-
-# Pre-v3 ucow had a separate LexerError. After the uplox migration
-# lexical errors come through as ParseError too, so keep the name
-# alive as an alias for the few `except LexerError` blocks below.
-LexerError = ParseError
+from .parser import (
+    LexerError,
+    Parser,
+    ParseError,
+    parse_file,
+    parse_string,
+    scan_tokens,
+)
 
 from .preprocessor import Preprocessor, PreprocessorError, preprocess_file
 from .types import TypeChecker, TypeError

@@ -61,6 +61,59 @@ class ParseError(Exception):
         super().__init__(f"{location}: {message}")
 
 
+class LexerError(ParseError):
+    """Error while scanning, as opposed to while parsing.
+
+    Pre-v3 ucow raised this from its own lexer. After the uplox
+    migration it wraps ``uplox.lex.scanner.ScanError``. It subclasses
+    :class:`ParseError` so that ``except ParseError`` still catches a
+    lexical error, as it did while this name was an alias for it, while
+    ``except LexerError`` once again catches only lexical ones.
+    """
+
+
+def _strip_echoed_position(message: str, loc: SourceLocation) -> str:
+    """Drop the position the uplox runtime writes into its own message.
+
+    ``ParseError`` prefixes every message with ``file:line:column``, and
+    the runtime's text ends the interesting part with
+    ``at line N, column M`` naming the same place, so the position was
+    being stated twice. It is removed only when N and M agree with the
+    location about to be printed; if the runtime rewords this, the match
+    fails and the message is passed through whole.
+    """
+    echoed = f" at line {loc.line}, column {loc.column}"
+    return message.replace(echoed, "", 1)
+
+
+def _scan_error_to_lexer_error(e: Exception, filename: str) -> LexerError:
+    """Translate a uplox ``ScanError`` into ucow's ``LexerError``.
+
+    Two things need undoing. The scanner formats its own
+    ``<file>:<line>:<col>: `` prefix into the message, and it has no
+    file name to use — the generated ``parse()`` entry point takes none
+    — so it says ``<input>``. Left alone, and with ``ParseError``
+    prepending a second, correct location, the result reads
+    ``lex.cow:2:6: <input>:2:6: lexical error at byte 0x24``.
+
+    The message itself is also less use than it looks: ``byte 0x24`` is
+    the character's code, not its offset, so it is spelled out here the
+    way 0.3.0 spelled it.
+    """
+    line = getattr(e, "line", 1)
+    column = getattr(e, "column", 1)
+    message = str(e)
+    prefix = f"<input>:{line}:{column}: "
+    if message.startswith(prefix):
+        message = message[len(prefix):]
+    code = getattr(e, "byte", None)
+    if code is not None and message == f"lexical error at byte 0x{code:02x}":
+        char = chr(code)
+        shown = repr(char) if char.isprintable() else f"0x{code:02x}"
+        message = f"Unexpected character: {shown}"
+    return LexerError(message, SourceLocation(filename, line, column))
+
+
 # ---- Public entry points ----------------------------------------------------
 
 
@@ -90,10 +143,9 @@ def parse_string(source: str, filename: str = "<input>") -> _ast.Program:
             loc = SourceLocation(filename, tok.line, tok.column)
         else:
             loc = SourceLocation(filename, 1, 1)
-        raise ParseError(str(e), loc) from e
+        raise ParseError(_strip_echoed_position(str(e), loc), loc) from e
     except ScanError as e:
-        loc = SourceLocation(filename, getattr(e, "line", 1), getattr(e, "column", 1))
-        raise ParseError(str(e), loc) from e
+        raise _scan_error_to_lexer_error(e, filename) from e
     return _translate(v3_root, filename)
 
 
@@ -111,8 +163,7 @@ def scan_tokens(source: str, filename: str = "<input>") -> List[Any]:
     try:
         return list(_ucg.scan(source))
     except ScanError as e:
-        loc = SourceLocation(filename, getattr(e, "line", 1), getattr(e, "column", 1))
-        raise ParseError(str(e), loc) from e
+        raise _scan_error_to_lexer_error(e, filename) from e
 
 
 class Parser:

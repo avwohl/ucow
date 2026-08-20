@@ -3,6 +3,60 @@
 Notable changes to ucow, a Cowgol compiler targeting 8080/Z80 CP/M.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.4.2
+
+Error reporting only. Every `.cow` program under `tests/` compiles to
+byte-identical `.mac` output under 0.4.1 and 0.4.2; the difference is
+what ucow prints when it refuses.
+
+### Fixed
+
+- **A syntax error says `Parse error:` again.** 0.4.0 replaced the
+  deleted lexer's exception with `LexerError = ParseError`, an alias.
+  The two `except` arms in each of the compile paths in `src/main.py`
+  then caught the same class, and since `except LexerError` came first,
+  the `Parse error:` arm was unreachable — every syntax error in the
+  language was announced as a lexer fault. `LexerError` is a real class
+  again, deriving from `ParseError` so that `except ParseError` still
+  catches a lexical error exactly as it did while the alias stood, and
+  `except LexerError` once more catches only lexical ones.
+
+- **A lexical error names the character and gives its position once.**
+  It read
+
+      Lexer error: lex.cow:2:6: <input>:2:6: lexical error at byte 0x24
+
+  Two faults in one line. The uplox scanner formats a location into its
+  own message, and the generated `parse()` entry point takes no file
+  name, so that copy always said `<input>`; ucow's `ParseError` then
+  prefixed the real one. And `byte 0x24` is the character's code, not
+  its offset, which reads like a file position and is not one. Now:
+
+      Lexer error: lex.cow:2:6: Unexpected character: '$'
+
+  which is what 0.3.0 printed. A character that will not print shows as
+  its code instead.
+
+- **A syntax error no longer states its position twice.** The uplox
+  runtime ends its text with `at line N, column M`, naming the place
+  ucow has already prefixed. That clause is dropped when N and M agree
+  with the location being printed, and left alone otherwise, so a
+  reworded runtime message passes through whole rather than silently
+  losing part of itself.
+
+### Still open from 0.4.0
+
+Two entries under 0.4.0's Known regressions stand: an unknown escape
+sequence in a string literal is still accepted silently, where 0.3.0
+rejected `"a\qb"` with `Unknown escape sequence \q`; and `CLAUDE.md`
+and `OPTIMIZATION_STRATEGY.md` still list the deleted `src/lexer.py`.
+The two faults older than the migration also stand: `run_tests.sh`
+assembles from `tests/` without an include path, so `runtime.mac` at the
+repo root is not found, and `runtime.mac` defines neither `print_de_nl`
+nor `print_i16_nl`, which the optimizer emits whenever a `print` is
+followed by a `print_nl`.
+
+
 ## 0.4.1
 
 The three nested-declaration regressions 0.4.0 shipped are fixed, and so
@@ -79,10 +133,10 @@ kept only the nested-`sub` case.
 
 ### Still open from 0.4.0
 
-One entry under 0.4.0's Known regressions stands: every syntax error is
-still labelled `Lexer error:`, because `LexerError` is an alias of
-`ParseError` and its `except` arm comes first. Two faults older than the
-migration also stand
+One entry under 0.4.0's Known regressions stands here and is fixed in
+0.4.2: every syntax error is labelled `Lexer error:`, because
+`LexerError` is an alias of `ParseError` and its `except` arm comes
+first. Two faults older than the migration also stand
 and are worth knowing about before running `run_tests.sh`: it assembles
 from `tests/` without an include path, so `runtime.mac` at the repo root
 is not found, and `runtime.mac` defines neither `print_de_nl` nor
@@ -253,7 +307,7 @@ the migration.
   any consumer that dereferences `.sub` gets an `AttributeError` on
   `None` rather than a diagnostic.
 
-- **Every syntax error is labelled `Lexer error:`.** Because
+- **Every syntax error is labelled `Lexer error:`.** (Fixed in 0.4.2.) Because
   `LexerError` is now an alias of `ParseError`, the `except LexerError`
   arm precedes the `except ParseError` arm in both compile paths in
   `src/main.py` (single-file and multi-file), which makes the
