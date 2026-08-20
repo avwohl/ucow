@@ -3,6 +3,57 @@
 Notable changes to ucow, a Cowgol compiler targeting 8080/Z80 CP/M.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.4.3
+
+An unknown escape sequence is an error again, in both string and
+character literals. Error reporting and literal validation only: every
+`.cow` program under `tests/` compiles to byte-identical `.mac` output
+under 0.4.2 and 0.4.3, and all 34 `.cow` / `.coh` sources in the
+repository still parse.
+
+### Fixed
+
+- **`"a\qb"` is rejected instead of compiling as `aqb`.**
+  `_unquote_string` looked each escape up in a table and fell back to
+  the escaped character itself, so any escape outside the valid seven
+  silently lost its backslash. 0.3.0 raised
+  `Unknown escape sequence \q`, and so does 0.4.3. The valid set is
+  0.3.0's, unchanged: `\n`, `\t`, `\r`, `\\`, `\'`, `\"`, `\0`.
+
+  The error names the position of the backslash, not of the literal:
+
+      Lexer error: esc.cow:1:21: Unknown escape sequence \q
+
+- **`'\q'` is rejected instead of evaluating to 113.** `_parse_number`
+  had the same fallback for character literals — `.get(ch, ord(ch))` —
+  so a typo'd escape quietly became the code of the escaped letter. This
+  was worse than the string case and was missed when the string case was
+  first written up, because 0.4.0's changelog recorded character
+  literals as unaffected, on the grounds that the uplox scanner rejected
+  them. It does not: `'\q'` scans, parses, and compiled to 113.
+
+  Both literal kinds now share one escape table, so they cannot drift
+  apart again. The seven valid escapes keep their exact values —
+  `'\n'` 10, `'\t'` 9, `'\r'` 13, `'\0'` 0, `'\\'` 92, `'\''` 39,
+  `'\"'` 34 — and `'\"'` stays valid, which 0.4.x allowed and 0.3.0 did
+  not; nothing is narrowed relative to what already worked.
+
+### Added
+
+- `tests/escape_test.cow`, which uses all seven valid escapes in both
+  literal kinds. It is in `run_tests.sh`'s list. The bundled sources use
+  only `\n`, `\t` and `\r`, which is why nothing caught the fallback.
+
+### Still open from 0.4.0
+
+`CLAUDE.md` and `OPTIMIZATION_STRATEGY.md` still list the deleted
+`src/lexer.py`. The two faults older than the migration also stand:
+`run_tests.sh` assembles from `tests/` without an include path, so
+`runtime.mac` at the repo root is not found, and `runtime.mac` defines
+neither `print_de_nl` nor `print_i16_nl`, which the optimizer emits
+whenever a `print` is followed by a `print_nl`.
+
+
 ## 0.4.2
 
 Error reporting only. Every `.cow` program under `tests/` compiles to
@@ -46,10 +97,12 @@ what ucow prints when it refuses.
 
 ### Still open from 0.4.0
 
-Two entries under 0.4.0's Known regressions stand: an unknown escape
-sequence in a string literal is still accepted silently, where 0.3.0
-rejected `"a\qb"` with `Unknown escape sequence \q`; and `CLAUDE.md`
-and `OPTIMIZATION_STRATEGY.md` still list the deleted `src/lexer.py`.
+Two entries under 0.4.0's Known regressions stand here. An unknown
+escape sequence in a string literal is still accepted silently, where
+0.3.0 rejected `"a\qb"` with `Unknown escape sequence \q` — fixed in
+0.4.3, which also fixes the character-literal case that entry recorded
+as unaffected. And `CLAUDE.md` and `OPTIMIZATION_STRATEGY.md` still list
+the deleted `src/lexer.py`.
 The two faults older than the migration also stand: `run_tests.sh`
 assembles from `tests/` without an include path, so `runtime.mac` at the
 repo root is not found, and `runtime.mac` defines neither `print_de_nl`
@@ -320,7 +373,8 @@ the migration.
   `lex.cow:3:5: Unexpected character: '$'`.
 
 - **Unknown escape sequences in string literals are now accepted
-  silently.** 0.3.0's lexer rejected `"a\qb"` with
+  silently.** (Fixed in 0.4.3, along with character literals, which
+  this entry wrongly recorded as unaffected.) 0.3.0's lexer rejected `"a\qb"` with
   `Unknown escape sequence \q`. The translator's `_unquote_string`
   maps any escape it does not recognise to the escaped character
   itself, so 0.4.0 compiles the same literal as `aqb` and says nothing.

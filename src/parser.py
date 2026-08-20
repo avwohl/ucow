@@ -237,7 +237,7 @@ def _translate_top_item(item: Any, filename: str) -> Optional[Any]:
     if isinstance(item, _ucg.IncludeDecl):
         return _ast.IncludeDecl(
             location=_loc(filename, item),
-            path=_unquote_string(item.path.text),
+            path=_unquote_string(item.path, filename),
         )
     if isinstance(item, _ucg.RecordDecl):
         return _translate_record_decl(item, filename)
@@ -311,7 +311,7 @@ def _translate_sub(sub: Any, filename: str) -> _ast.SubDecl:
     extern_name: Optional[str] = None
     for attr in attrs:
         if isinstance(attr, _ucg.ExternAttr):
-            extern_name = _unquote_string(attr.name.text)
+            extern_name = _unquote_string(attr.name, filename)
 
     implements: Optional[str] = None
     if getattr(sub, "implements", None) is not None:
@@ -490,7 +490,7 @@ def _translate_statement(s: Any, filename: str) -> _ast.Statement:
         # token is always a literal (the first piece of asm text); the
         # rest come from `more` and may be string literals or expressions.
         parts: list[Union[str, _ast.Expression]] = []
-        parts.append(_unquote_string(s.first.text))
+        parts.append(_unquote_string(s.first, filename))
         for expr in s.more:
             tx = _translate_expression(expr, filename)
             if isinstance(tx, _ast.StringLiteral):
@@ -509,9 +509,9 @@ def _translate_statement(s: Any, filename: str) -> _ast.Statement:
 def _translate_expression(e: Any, filename: str) -> _ast.Expression:
     loc = _loc(filename, e)
     if isinstance(e, _ucg.NumberLiteral):
-        return _ast.NumberLiteral(location=loc, value=_parse_number(e.value.text))
+        return _ast.NumberLiteral(location=loc, value=_parse_number(e.value, filename))
     if isinstance(e, _ucg.StringLiteral):
-        return _ast.StringLiteral(location=loc, value=_unquote_string(e.value.text))
+        return _ast.StringLiteral(location=loc, value=_unquote_string(e.value, filename))
     if isinstance(e, _ucg.NilLiteral):
         return _ast.NilLiteral(location=loc)
     if isinstance(e, _ucg.Identifier):
@@ -689,21 +689,44 @@ def _translate_scalar_kind(b: Any, filename: str) -> _ast.ScalarType:
 # ---- Literal-text helpers ---------------------------------------------------
 
 
-def _parse_number(text: str) -> int:
+# The escapes a string literal may contain. This is 0.3.0's set exactly,
+# and the grammar does not narrow or widen it: the uplox scanner matches
+# a string as "any run of non-quote characters, with backslash-anything
+# allowed through", so which escapes are meaningful is decided here.
+_STRING_ESCAPES = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "0": "\0",
+}
+
+
+def _parse_number(tok: Any, filename: str) -> int:
     """Parse a Cowgol numeric literal into an int.
 
     Handles 0x / 0o / 0b / 0d prefixes, underscores within digit runs,
-    and single-quoted character literals (``'A'``, ``'\\n'``).
+    and single-quoted character literals (``'A'``, ``'\\n'``). An escape
+    a character literal may not contain is an error, on the same terms
+    as one in a string literal — see :func:`_unquote_string`.
     """
+    text = tok.text
     if not text:
         raise ValueError("empty number literal")
     if text[0] == "'":
         body = text[1:-1]
         if body.startswith("\\"):
             ch = body[1]
-            return {"n": 10, "t": 9, "r": 13, "\\": 92, "'": 39, '"': 34, "0": 0}.get(
-                ch, ord(ch)
-            )
+            if ch not in _STRING_ESCAPES:
+                loc = SourceLocation(
+                    filename,
+                    getattr(tok, "line", 1),
+                    getattr(tok, "column", 1) + 1,
+                )
+                raise LexerError(f"Unknown escape sequence \\{ch}", loc)
+            return ord(_STRING_ESCAPES[ch])
         return ord(body)
     flat = text.replace("_", "")
     if flat.startswith(("0x", "0X")):
@@ -717,23 +740,39 @@ def _parse_number(text: str) -> int:
     return int(flat, 10)
 
 
-def _unquote_string(text: str) -> str:
-    """Strip the surrounding double quotes and process backslash escapes."""
+def _unquote_string(tok: Any, filename: str) -> str:
+    """Strip the surrounding double quotes and process backslash escapes.
+
+    An escape outside :data:`_STRING_ESCAPES` is an error, as it was in
+    0.3.0. 0.4.0 through 0.4.2 mapped anything unrecognised to the
+    escaped character itself, so ``"a\\qb"`` compiled quietly as ``aqb``
+    and a typo'd escape reached the generated code as text.
+
+    The token is taken whole rather than just its text so the offending
+    escape can be pointed at. A string literal cannot span a line, so
+    the column is the literal's own column plus the offset into it.
+    """
+    text = tok.text
     if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
         body = text[1:-1]
+        body_offset = 1
     else:
         body = text
+        body_offset = 0
     out: list[str] = []
     i = 0
     while i < len(body):
         c = body[i]
         if c == "\\" and i + 1 < len(body):
             esc = body[i + 1]
-            out.append(
-                {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'", '"': '"', "0": "\0"}.get(
-                    esc, esc
+            if esc not in _STRING_ESCAPES:
+                loc = SourceLocation(
+                    filename,
+                    getattr(tok, "line", 1),
+                    getattr(tok, "column", 1) + i + body_offset,
                 )
-            )
+                raise LexerError(f"Unknown escape sequence \\{esc}", loc)
+            out.append(_STRING_ESCAPES[esc])
             i += 2
         else:
             out.append(c)

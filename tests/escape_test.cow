@@ -1,0 +1,40 @@
+# Every escape a string or character literal may contain.
+#
+# Regression test for 0.4.3. 0.4.0 through 0.4.2 mapped an escape they
+# did not recognise to the escaped character itself -- in _unquote_string
+# for strings and in _parse_number for character literals -- so "a\qb"
+# compiled quietly as `aqb` and '\q' as 113, the code for `q`. Both are
+# an error again, as they were in 0.3.0. This file holds the other half
+# of that: the seven escapes that are valid must keep their values.
+#
+# print_nl() is avoided on purpose; see tests/nested_decl_test.cow.
+
+var nl:    uint8 := '\n';
+var tab:   uint8 := '\t';
+var cr:    uint8 := '\r';
+var nul:   uint8 := '\0';
+var bs:    uint8 := '\\';
+var squot: uint8 := '\'';
+var dquot: uint8 := '\"';
+var plain: uint8 := 'A';
+
+var text: [uint8] := "tab\there\r\n";
+
+print("escape test: ");
+print_i8(nl);
+print(" ");
+print_i8(tab);
+print(" ");
+print_i8(cr);
+print(" ");
+print_i8(nul);
+print(" ");
+print_i8(bs);
+print(" ");
+print_i8(squot);
+print(" ");
+print_i8(dquot);
+print(" ");
+print_i8(plain);
+print("\r\n");
+print(text);
