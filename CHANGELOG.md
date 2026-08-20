@@ -6,8 +6,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## Unreleased
 
 Repository only — no release. Neither the wheel nor the sdist contains
-`run_tests.sh` or the file removed below, so the distributed package is
-byte-identical to 0.4.3 and there is nothing to publish.
+`run_tests.sh`, `tests/`, or the file removed below, so the distributed
+package is byte-identical to 0.4.3 and there is nothing to publish.
 
 ### Fixed
 
@@ -41,13 +41,23 @@ byte-identical to 0.4.3 and there is nothing to publish.
   is now a clear message rather than a failure attributed to each test
   in turn.
 
-  12 of the 13 tests pass. `asm_test` fails to assemble, which is
-  neither of the faults above: it writes 8080 mnemonics — `lxi`,
-  `shld`, `mvi` — into a module codegen marks `.Z80`, so the assembler
-  rejects them. The test was added in the first commit and `.Z80` came
-  later, so it has never passed; it was invisible while nothing
-  assembled at all. Whether `@asm` should accept 8080 syntax, or the
-  test should be rewritten in Z80 mnemonics, is a decision left open.
+  All 13 tests pass.
+
+- **`tests/asm_test.cow` is written in Z80 mnemonics.** It carried the
+  8080 spellings `lxi h, 42`, `shld`, `mvi e, 65` and `mvi c, 2`, but
+  codegen emits a `.Z80` directive at the top of every module, so um80
+  assembles in Z80 mode and rejects them: `Unknown instruction or
+  directive: LXI`. The test was added in the first commit and `.Z80`
+  arrived later, so it had never once assembled — it was invisible for
+  as long as no test in the suite could assemble at all.
+
+  `ld hl, 42`, `ld (`value`), hl`, `ld e, 65` and `ld c, 2` now, with
+  the BDOS `call 5` unchanged. The multi-part `@asm "ld (", value,
+  "), hl"` form emits the variable's symbol between the two text
+  pieces. Both halves of what the test intends are exercised: it prints
+  `Value set via asm: 42`, so the inline store reached the variable and
+  `print_i16` read it back, and `Direct BDOS call: A`, so the raw BDOS
+  console-output call ran.
 
 ### Still open from 0.4.0
 

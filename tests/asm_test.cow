@@ -1,4 +1,10 @@
 # Test inline assembly
+#
+# Z80 mnemonics: codegen emits a `.Z80` directive at the top of every
+# module, so um80 assembles in Z80 mode and rejects the 8080 spellings
+# (LXI, SHLD, MVI) this test used to carry. It had done so since `.Z80`
+# was introduced, but nothing noticed while run_tests.sh could not
+# assemble at all.
 
 var value: uint16;
 
@@ -6,8 +12,8 @@ print("Inline assembly test:\r\n");
 
 # Set value using inline assembly
 value := 0;
-@asm "lxi h, 42";
-@asm "shld ", value;
+@asm "ld hl, 42";
+@asm "ld (", value, "), hl";
 
 print("Value set via asm: ");
 print_i16(value);
@@ -15,7 +21,7 @@ print_nl();
 
 # Test BDOS call via inline asm
 print("Direct BDOS call: ");
-@asm "mvi e, 65";   # 'A'
-@asm "mvi c, 2";    # Console output
+@asm "ld e, 65";    # 'A'
+@asm "ld c, 2";     # Console output
 @asm "call 5";      # BDOS
 print_nl();
