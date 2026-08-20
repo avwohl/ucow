@@ -6,20 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## 0.4.6
 
 0.4.5 fixed the dead-store pass for addresses held in a register pair.
-An adversarial review of that release found five more ways the same
-pass deletes a live store, all with the same cause: it matched raw,
-uppercase, `$`-anchored instruction text, and anything it failed to
-recognise it silently assumed was harmless. One of the five is
-reachable from ordinary source; the other four are hardening. All five
-predate 0.4.5 and are in every earlier release.
+An adversarial review of that release found seven more ways the same
+pass deletes a live store, all with one cause: it matched raw,
+uppercase, `$`-anchored instruction text, so anything it failed to
+recognise it silently assumed was harmless. All seven predate 0.4.5.
 
-The pass now matches against a canonical form of each line — comment
-stripped, whitespace runs collapsed — with case-insensitive patterns,
-and keys variables the way um80 resolves labels, which is
-case-insensitively. It also costs nothing: across the eighteen `.cow`
-programs under `tests/` it emits one instruction *fewer* than 0.4.5,
-because recognising `@asm` stores lets it retire a genuinely dead one
-it used to miss.
+The pass now matches a canonical form of each line — comment stripped,
+whitespace runs collapsed — with case-insensitive patterns, and keys a
+variable only when the operand is a bare label, lowercased because that
+is how um80 resolves labels (`JP foo` finds `Foo:`).
 
 ### Fixed
 
@@ -28,74 +23,87 @@ it used to miss.
   `@asm "ld a, (", v, ")"` reaches the optimizer as
   `ld a, (<TAB>v_v<TAB>)`: lowercase, with whitespace inside the
   operand. The read pattern was uppercase and `$`-anchored, so it did
-  not match, the store feeding the read was judged dead, and it was
-  deleted:
-
-  ```
-  v := 42;  @asm "ld a, (", v, ")";  ... print it ...
-  v := 65;  @asm "ld a, (", v, ")";  ... print it ...
-  ```
-
-  printed `A` where `--no-post-opt` printed `*A`. This is the one of
-  the five that ordinary source reaches, and `tests/asm_read_test.cow`
-  covers it.
+  not match, and the store feeding the read was deleted as dead.
 
 - **Lowercase `call` is a control-flow barrier.** The check was
-  `stripped.startswith('CALL')`. Not hypothetical: `tests/asm_test.cow`
-  emits `call 5` into this very stream.
+  `stripped.startswith('CALL')`. `tests/asm_test.cow` emits `call 5`
+  into this very stream.
+
+- **A label sharing its line with an instruction is a barrier.** The
+  check was `stripped.endswith(':')`, so `STR1:<TAB>DB 73,110,...` —
+  which every generated file contains — was not one.
 
 - **`RET NZ`, `RETI`, `RETN` and `RST` are barriers.** Only the exact
-  string `RET` was. With `RET NZ` between two stores to one variable the
-  first was deleted, but on the taken path control leaves before the
-  second runs, so the caller reads a stale value.
+  string `RET` was. With `RET NZ` between two stores to one variable
+  the first was deleted, but on the taken path control leaves before
+  the second runs, so the caller reads a stale value.
 
 - **`LD SP,(nn)`, `LD IX,(nn)` and `LD IY,(nn)` count as reads.** The
-  read pattern listed only A, HL, DE and BC. These forms exist on the
-  Z80 — `LD IX,(nn)` is DD 2A nn nn — and neither cleared the pending
-  store nor tripped the catch-all.
+  read pattern listed only A, HL, DE and BC. `LD IX,(nn)` is a real
+  instruction (DD 2A nn nn) and neither cleared the pending store nor
+  tripped the catch-all.
 
 - **An 8-bit store no longer kills a 16-bit one.** `LD (v),HL` writes
   `v` and `v+1`; a following `LD (v),A` rewrites only `v`, yet the pass
   deleted the 16-bit store and the high byte silently kept its old
-  value. Store width is now tracked, and a narrower store does not
-  retire a wider one.
+  value. Store width is tracked now.
 
-- **A label sharing its line with an instruction is a barrier**, and a
-  trailing comment no longer hides a read. Both followed from matching
-  raw text: `lbl:<TAB>NOP` did not end in a colon, and
-  `LD A,(v_x)<TAB>; read` did not end in a parenthesis.
+- **A trailing comment no longer hides a read.** `LD A,(v_x)<TAB>; read`
+  did not end in a parenthesis, so the `$`-anchored pattern missed it.
+
+Which of these current output can actually reach, measured across the
+eighteen generated `.mac` files rather than assumed: the `@asm` read and
+lowercase `call` (one file, both through `@asm`), and the shared-line
+label (all eighteen, as `STR1:` data definitions). The other four —
+conditional returns, `LD SP/IX/IY,(nn)`, a narrower store retiring a
+wider one, and a commented read — appear zero times, and are fixed as
+hardening.
+
+### Cost
+
+Nothing, and nothing gained either: across the eighteen `.cow` programs
+the total is 2405 instructions before and after. `asm_test` loses one,
+because recognising `@asm` *stores* lets the pass retire a genuinely
+dead `LD (v_value),HL` it used to miss, and `asm_read_test` gains one,
+which is the store this release stops deleting. They cancel exactly.
 
 ### Added
 
-- **Every test but one has a recorded output baseline.** 0.4.5 added
-  the comparison but only two tests had a file to compare against; the
-  other thirteen were still crash tests, and the skip was silent. There
-  are now seventeen baselines, taken from `--no-post-opt` output so they
-  record correct behaviour rather than current behaviour. `simple`
-  prints nothing, so it has none — an empty baseline passes vacuously —
-  and the runner now says `(no baseline: exit status only)` rather than
-  reporting a bare PASS.
+- **`tests/asm_read_test.cow`**, which pins the headline fault. Nothing
+  between its two stores is a barrier — the value read is stashed in a
+  second variable and printed afterwards — so the only thing that can
+  save the first store is recognising the `@asm` read. Verified by
+  reverting the read pattern alone, with every other fix in place: the
+  test goes red.
 
-- **`simple` and `include_test` are in the suite.** Both were sitting in
-  `tests/` unrun. That is eighteen tests, all passing.
+- **Sixteen recorded output baselines**, where 0.4.5 had two. The other
+  thirteen tests were crash tests with a silent skip. Baselines are
+  taken from `--no-post-opt` output, so they record what the compiler
+  does without the optimizer rather than merely what it does now.
 
-- **A timeout around cpmemu**, 20 seconds by default and settable with
+- **`simple` and `include_test` are in the suite**, both previously
+  sitting in `tests/` unrun. Eighteen tests, all passing.
+
+- **A timeout around cpmemu**, 20 seconds by default, settable with
   `$CPMEMU_TIMEOUT`. cpmemu has no limit of its own, so a miscompiled
-  loop condition hung the suite instead of failing it.
+  loop hung the suite instead of failing it.
 
-### Verification
+- A test without a baseline now reports `(no baseline: exit status
+  only)` rather than a bare PASS. `simple` is the only one: it prints
+  nothing, and an empty baseline passes vacuously.
 
-Every `.cow` program under `tests/` was compiled with and without
-`--no-post-opt` and run under cpmemu: all eighteen agree, which is the
-property the optimizer is supposed to have and the one the dead-store
-bugs broke.
+### Known issue
 
-Worth stating plainly: the existing programs did **not** catch these
-five. Restoring the 0.4.5 pass leaves all seventeen of them green — only
-the new `asm_read_test` goes red. The other four faults are not
-reachable from anything `codegen` emits today, and were found and fixed
-at the level of the pass itself, against hand-written instruction
-sequences, not by the suite.
+**An interface call drops its argument.** `tests/interface_test.cow`
+calls `my_printer(42)` and `my_printer(255)` and prints 538 and 0x0220,
+which are the addresses of the two subroutines. Changing the arguments
+to 9999 and 4660 gives byte-identical output. `codegen` emits
+`LD HL,(v_my_printer)` / `CALL _callhl` and never loads the argument.
+
+This is pre-existing and not this release's to fix, but it is why
+`interface_test` has no baseline: recording that output would freeze a
+wrong value into a file the suite then defends, which is the opposite
+of what the baselines are for.
 
 ## 0.4.5
 

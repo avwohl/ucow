@@ -878,15 +878,34 @@ def _canon(text: str) -> str:
     return re.sub(r'\s+', ' ', _strip_comment(text)).strip()
 
 
+# A plain label, and nothing else: no offset, no operator, no character
+# literal. Lowercasing is only safe for one of these, since um80 resolves
+# labels case-insensitively; applied to an operand with a quoted
+# character in it, it silently equates two different addresses.
+_SYMBOL_OPERAND_RE = re.compile(r'^[A-Za-z_.$?][\w.$?]*$')
+
+
 def _operand_key(operand: str) -> str:
     """The variable a `(...)` operand names, or '' if it names none.
 
     Whitespace is removed because `@asm` interpolation puts tabs inside
-    the parentheses, and the result is lowercased because um80 matches
-    labels that way.
+    the parentheses, so `(<TAB>v_x<TAB>)` and `(v_x)` are one variable.
+
+    Anything that is not then a bare label gets no key at all, which
+    makes the caller clear everything pending rather than track it. An
+    expression operand cannot be compared by text: `(v_buf+'A')` and
+    `(v_buf+'a')` are thirty-two bytes apart, and lowercasing to match
+    um80's label rules would equate them and delete a live store --
+    exactly the class of fault this pass keeps being fixed for.
     """
-    name = re.sub(r'\s+', '', operand)
+    # Only surrounding whitespace is dropped. Collapsing internal
+    # whitespace first would turn the expression `v_x AND 3` into the
+    # perfectly good identifier `v_xAND3`, which is how an expression
+    # sneaks past the check below and collides with a real symbol.
+    name = operand.strip()
     if not name or _INDIRECT_OPERAND_RE.match(name):
+        return ''
+    if not _SYMBOL_OPERAND_RE.match(name):
         return ''
     return name.lower()
 
@@ -951,7 +970,12 @@ def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[lis
             # standing, so it does not make that store dead.
             if prev is not None and width >= prev[2]:
                 prev_idx, prev_size, _ = prev
-                if _STORE_RE.match(_canon(result[prev_idx])):
+                prev_store = _STORE_RE.match(_canon(result[prev_idx]))
+                # Confirm the recorded line really is a store to THIS
+                # variable before removing it. Checking only that it is
+                # some store would let a key collision delete an
+                # unrelated one.
+                if prev_store and _operand_key(prev_store.group(1)) == var:
                     result.pop(prev_idx)
                     total_savings += prev_size
                     pending_stores = {

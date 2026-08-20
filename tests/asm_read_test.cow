@@ -4,24 +4,27 @@
 # tabs, so `@asm "ld a, (", v, ")"` reaches the post-assembly optimizer
 # as `ld a, (<TAB>v_v<TAB>)` -- lowercase, with whitespace inside the
 # operand. The dead-store pass matched raw uppercase text anchored with
-# $, so it did not recognise that as a read of v, decided the store
-# feeding it was dead, and deleted it. The first character below went
-# missing.
+# $, did not recognise that as a read of v, judged the store feeding it
+# dead, and deleted it.
+#
+# Nothing between the two stores to v may be a control-flow barrier, or
+# the barrier would save the store on its own and this would pass
+# whether or not the read is recognised. So the value read is stashed in
+# w with a second @asm store, and only printed afterwards. w is 42 if
+# the read was honoured and garbage if the store was deleted.
 #
 # print_nl() is avoided on purpose; see tests/nested_decl_test.cow.
 
 var v: uint8;
+var w: uint8;
 
-v := 42;                    # '*'
+v := 42;
 @asm "ld a, (", v, ")";
-@asm "ld e, a";
-@asm "ld c, 2";
-@asm "call 5";
+@asm "ld (", w, "), a";
+v := 65;
 
-v := 65;                    # 'A'
-@asm "ld a, (", v, ")";
-@asm "ld e, a";
-@asm "ld c, 2";
-@asm "call 5";
-
+print("w ");
+print_i8(w);
+print(" v ");
+print_i8(v);
 print("\r\n");
