@@ -14,7 +14,11 @@ recognise it silently assumed was harmless. All seven predate 0.4.5.
 The pass now matches a canonical form of each line — comment stripped,
 whitespace runs collapsed — with case-insensitive patterns, and keys a
 variable only when the operand is a bare label, lowercased because that
-is how um80 resolves labels (`JP foo` finds `Foo:`).
+is how um80 resolves labels (`JP foo` finds `Foo:`). Not everything
+shaped like a label is one: `$` is the location counter, so `LD ($),HL`
+twice is two addresses, and a `sym DEFL expr` line gives an existing
+name a new value, so it ends the run the way a branch does. Both are
+excluded.
 
 ### Fixed
 
@@ -31,7 +35,8 @@ is how um80 resolves labels (`JP foo` finds `Foo:`).
 
 - **A label sharing its line with an instruction is a barrier.** The
   check was `stripped.endswith(':')`, so `STR1:<TAB>DB 73,110,...` —
-  which every generated file contains — was not one.
+  which seventeen of the eighteen generated files contain — was not
+  one.
 
 - **`RET NZ`, `RETI`, `RETN` and `RST` are barriers.** Only the exact
   string `RET` was. With `RET NZ` between two stores to one variable
@@ -54,7 +59,9 @@ is how um80 resolves labels (`JP foo` finds `Foo:`).
 Which of these current output can actually reach, measured across the
 eighteen generated `.mac` files rather than assumed: the `@asm` read and
 lowercase `call` (one file, both through `@asm`), and the shared-line
-label (all eighteen, as `STR1:` data definitions). The other four —
+label (all eighteen — as `STR1:` string data in seventeen, and in
+`simple.mac`, which has no string literals, as its `v_a:<TAB>DS<TAB>2`
+variable definitions). The other four —
 conditional returns, `LD SP/IX/IY,(nn)`, a narrower store retiring a
 wider one, and a commented read — appear zero times, and are fixed as
 hardening.
@@ -62,7 +69,9 @@ hardening.
 ### Cost
 
 Nothing, and nothing gained either: across the eighteen `.cow` programs
-the total is 2405 instructions before and after. `asm_test` loses one,
+the total is 2314 instructions before and after — 2405 tab-indented
+lines, of which 91 are directives rather than instructions.
+`asm_test` loses one,
 because recognising `@asm` *stores* lets the pass retire a genuinely
 dead `LD (v_value),HL` it used to miss, and `asm_read_test` gains one,
 which is the store this release stops deleting. They cancel exactly.
@@ -77,7 +86,7 @@ which is the store this release stops deleting. They cancel exactly.
   test goes red.
 
 - **Sixteen recorded output baselines**, where 0.4.5 had two. The other
-  thirteen tests were crash tests with a silent skip. Baselines are
+  thirteen tests it ran were crash tests with a silent skip. Baselines are
   taken from `--no-post-opt` output, so they record what the compiler
   does without the optimizer rather than merely what it does now.
 
@@ -89,8 +98,9 @@ which is the store this release stops deleting. They cancel exactly.
   loop hung the suite instead of failing it.
 
 - A test without a baseline now reports `(no baseline: exit status
-  only)` rather than a bare PASS. `simple` is the only one: it prints
-  nothing, and an empty baseline passes vacuously.
+  only)` rather than a bare PASS. Two do: `simple`, which prints
+  nothing, so an empty baseline would pass vacuously, and
+  `interface_test`, deliberately, for the reason under Known issue.
 
 ### Known issue
 

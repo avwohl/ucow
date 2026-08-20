@@ -841,6 +841,11 @@ _INDIRECT_REF_RE = re.compile(r'\(\s*(?:%s)\s*(?:[-+][^)]*)?\s*\)' % _ADDR_REGS,
 # Block moves, block compares and block I/O walk memory wholesale.
 _BLOCK_OP_RE = re.compile(r'\b(?:LD[ID]R?|CP[ID]R?|IN[ID]R?|OT[ID]R|OUT[ID])\b', re.I)
 
+# `sym DEFL expr` and `sym SET expr` give an existing symbol a new
+# value, so a name before and after one of these is two addresses. EQU
+# cannot legally redefine, but costs nothing to treat the same way.
+_REDEFINE_RE = re.compile(r'^[A-Za-z_.$?][\w.$?]*\s+(?:DEFL|SET|EQU|ASET)\b', re.I)
+
 # Anything that can leave this straight-line run. RET needs the optional
 # condition: `RET NZ` leaves on the taken path, so a store after it does
 # not kill one before it. RST and the interrupt returns leave too.
@@ -905,6 +910,11 @@ def _operand_key(operand: str) -> str:
     name = operand.strip()
     if not name or _INDIRECT_OPERAND_RE.match(name):
         return ''
+    if name == '$':
+        # um80's location counter. It spells like a symbol and is not
+        # one: `LD ($),HL` names wherever the assembler has got to, so
+        # two of them are two different addresses.
+        return ''
     if not _SYMBOL_OPERAND_RE.match(name):
         return ''
     return name.lower()
@@ -943,7 +953,9 @@ def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[lis
         # Labels and control flow reset tracking. A label may share its
         # line with an instruction, so this cannot just test for a
         # trailing colon.
-        if re.match(r'^[A-Za-z_.$?][\w.$?]*\s*:', canon) or _BARRIER_RE.match(canon):
+        if (re.match(r'^[A-Za-z_.$?][\w.$?]*\s*:', canon)
+                or _BARRIER_RE.match(canon)
+                or _REDEFINE_RE.match(canon)):
             pending_stores = {}
             result.append(line)
             i += 1
