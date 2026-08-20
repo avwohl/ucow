@@ -24,7 +24,7 @@ GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
 # List of tests to run
-TESTS="hello arith loop record record2 typedef_test inherit_test interface_test union_test fwddecl_test asm_test nested_decl_test escape_test"
+TESTS="hello arith loop record record2 typedef_test inherit_test interface_test union_test fwddecl_test asm_test nested_decl_test escape_test dead_store_test test_all"
 
 PASSED=0
 FAILED=0
@@ -60,14 +60,39 @@ EOF
 
     # Run
     output=$("$CPMEMU" "$TESTS_DIR/${test}.cfg" 2>&1)
-    if echo "$output" | grep -q "Program exit via JMP 0"; then
-        echo -e "${GREEN}PASS${NC}"
-        ((PASSED++))
-    else
+    if ! echo "$output" | grep -q "Program exit via JMP 0"; then
         echo -e "${RED}FAIL${NC} (runtime error)"
         echo "$output"
         ((FAILED++))
+        continue
     fi
+
+    # Compare what the program printed against a recorded baseline, where
+    # one exists. Without this the check above is only a crash test: a
+    # miscompile that still exits cleanly passes it. That is exactly what
+    # happened -- postopt deleted a live store to a byte array and the
+    # suite stayed green for it, because test_all was not in TESTS and
+    # nothing diffed its output.
+    expected="$TESTS_DIR/${test}_expected.txt"
+    # test_all's baseline predates the naming convention.
+    [ "$test" = "test_all" ] && expected="$TESTS_DIR/test_expected.txt"
+
+    if [ -f "$expected" ]; then
+        # Drop cpmemu's own first two lines and its exit notice, and
+        # normalise the CR the CP/M program emits.
+        printf '%s\n' "$output" \
+            | sed -e '1,2d' -e '/^Program exit via JMP 0$/d' \
+            | tr -d '\r' > "$TESTS_DIR/${test}.out"
+        if ! diff -q <(tr -d '\r' < "$expected") "$TESTS_DIR/${test}.out" >/dev/null; then
+            echo -e "${RED}FAIL${NC} (output differs from ${expected##*/})"
+            diff <(tr -d '\r' < "$expected") "$TESTS_DIR/${test}.out" | head -20
+            ((FAILED++))
+            continue
+        fi
+    fi
+
+    echo -e "${GREEN}PASS${NC}"
+    ((PASSED++))
 done
 
 echo ""

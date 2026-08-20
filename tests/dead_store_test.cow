@@ -1,0 +1,43 @@
+# Regression test for the postopt dead-store pass.
+#
+# 0.4.4 and earlier matched `LD (<operand>),A` and took the operand text
+# as a variable name, so two stores through the same register pair looked
+# like two stores to one variable and the first was deleted. Consecutive
+# byte-array element assignments are exactly that shape, so `a[0] := 7`
+# below was dropped and a[0] read back as 0.
+#
+# print_nl() is avoided on purpose; see tests/nested_decl_test.cow.
+
+var a: uint8[4];
+var b: uint16[3];
+
+# Consecutive element stores: each must survive.
+a[0] := 7;
+a[1] := 3;
+a[2] := 11;
+a[3] := 1;
+
+b[0] := 100;
+b[1] := 200;
+
+# Read one back between two stores, which must also keep the first alive.
+var seen: uint8;
+a[0] := 5;
+seen := a[0];
+a[0] := 9;
+
+print("a ");
+print_i8(a[0]);
+print(" ");
+print_i8(a[1]);
+print(" ");
+print_i8(a[2]);
+print(" ");
+print_i8(a[3]);
+print(" b ");
+print_i16(b[0]);
+print(" ");
+print_i16(b[1]);
+print(" seen ");
+print_i8(seen);
+print("\r\n");

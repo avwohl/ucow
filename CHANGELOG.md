@@ -3,6 +3,89 @@
 Notable changes to ucow, a Cowgol compiler targeting 8080/Z80 CP/M.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.4.5
+
+A silent miscompile in the post-assembly optimizer. Any program that
+assigns to consecutive elements of a byte array was affected, and
+nothing reported anything: the code assembled, linked, ran, and exited
+cleanly with a wrong value in memory. It has been there since the pass
+was written, so every release up to and including 0.4.4 carries it.
+
+### Fixed
+
+- **The dead-store pass no longer deletes a live store made through a
+  register pair.** `dead_store_elimination` in `src/postopt.py` matched
+  `LD (<operand>),A` and took the operand text as a variable name. In
+  `LD (DE),A` the address is whatever DE holds, so two element stores
+  through the same register pair read as two stores to one variable
+  named "DE", and the pass dropped the first as dead:
+
+  ```
+  var a: uint8[4];
+  a[0] := 7;
+  a[1] := 3;
+  ```
+
+  printed `a0 0 sum 3` — the 7 gone — where `--no-post-opt` gave the
+  correct `a0 7 sum 10`. Exit 0, no diagnostic, wrong program.
+
+  Two more faults of the same shape were found while fixing it, both
+  reachable the same way:
+
+  `LD (HL),A` matched that regex too, so it was tracked as a store to a
+  variable called "HL". The `'(HL)' in stripped` guard further down was
+  meant to prevent exactly this and never ran, because the store branch
+  matched first and continued past it.
+
+  `LD A,(HL)` matched the *read* regex, so a read through a register
+  pair only removed "HL" from the pending map — a name no variable
+  has — instead of invalidating the variable actually being read. A
+  store, an indirect read of it, and a second store therefore lost the
+  first store even though it was live.
+
+  An operand naming HL, DE, BC, SP, IX or IY (with any displacement) is
+  now recognised as an address rather than a name. Such a store or read
+  can touch any variable, so it clears everything pending instead of
+  being tracked. The catch-all that clears on complex instructions was
+  widened from `(HL)` and `LDIR`/`LDDR` to every register-indirect
+  reference — `INC (HL)`, `EX (SP),HL`, `ADD A,(IX+2)` — and to the
+  block compare and block I/O instructions alongside the block moves.
+
+  The pass is not weakened in practice: across all sixteen `.cow`
+  programs under `tests/`, the fix costs exactly one instruction, the
+  one that was being wrongly deleted. Every `.com` is byte-for-byte the
+  size it was.
+
+- **The removal is by index rather than by re-scanning for the text.**
+  Having decided a store was dead, the pass searched `result` backwards
+  for a line starting `LD\t(<var>)`, which can find a different store to
+  the same variable than the one it measured. It now pops the recorded
+  index, checks that line is the store it expects before removing it,
+  and fixes up the indices of the other pending stores, which the
+  previous code left pointing one position too high after any removal.
+
+### Added
+
+- **`run_tests.sh` compares program output against a baseline.** It only
+  grepped for `Program exit via JMP 0`, which makes it a crash test: a
+  miscompile that still exits cleanly passes. That is precisely what
+  happened here. Where `tests/<name>_expected.txt` exists the runner now
+  diffs what the program printed, and reports the differing lines.
+
+- **`test_all` is in the suite.** `tests/test_expected.txt` has been in
+  the repository all along as its baseline, and disagreed with reality
+  on one line — `tdef3 20` against an expected `tdef3 30` — but the test
+  was not in `TESTS`, so that baseline sat red and unrun while the suite
+  reported everything green.
+
+- **`tests/dead_store_test.cow`** and its baseline, covering all three
+  faults directly: consecutive `uint8` and `uint16` element stores, and
+  a store followed by an indirect read and another store. Both it and
+  `test_all` fail against the 0.4.4 pass and pass against this one,
+  which is how the fix was checked.
+
+The suite is 15 passed, 0 failed.
+
 ## 0.4.4
 
 No compiler change: the only difference under `src/` is the version
@@ -105,9 +188,9 @@ fixed or recorded against the release that fixed it.
 
 ### Known issue
 
-Not introduced here — it is in 0.4.3 and earlier too, and `src/` is
-unchanged in this release — but it was found while verifying 0.4.4 and
-is worth knowing before you upgrade into it.
+(Fixed in 0.4.5.) Not introduced here — it is in 0.4.3 and earlier too,
+and `src/` is unchanged in this release — but it was found while
+verifying 0.4.4 and is worth knowing before you upgrade into it.
 
 **The post-assembly dead-store pass deletes a live store to a byte
 array.** `dead_store_elimination` in `src/postopt.py` matches

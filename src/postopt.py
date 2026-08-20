@@ -815,6 +815,26 @@ def address_folding_pass(lines: list[str], verbose: bool = False) -> tuple[list[
     return result, total_savings
 
 
+# Operands of `LD (x),r` / `LD r,(x)` that address memory through a
+# register rather than naming a variable: (HL), (DE), (BC), (IX+d),
+# (IY-d), (SP). The address is whatever the register holds, so the
+# operand text carries no aliasing information at all.
+_INDIRECT_OPERAND_RE = re.compile(r'^\s*(HL|DE|BC|SP|IX|IY)\s*([-+][^)]*)?\s*$', re.I)
+
+# The same registers seen anywhere in an instruction's text, for the
+# catch-all: `INC (HL)`, `EX (SP),HL`, `ADD A,(IX+2)` all touch memory
+# the pass cannot account for.
+_INDIRECT_REF_RE = re.compile(r'\(\s*(HL|DE|BC|SP|IX|IY)\s*([-+][^)]*)?\s*\)', re.I)
+
+# Block moves, block compares and block I/O walk memory wholesale.
+_BLOCK_OP_RE = re.compile(r'\b(LD[ID]R?|CP[ID]R?|IN[ID]R?|OT[ID]R|OUT[ID])\b', re.I)
+
+
+def _is_indirect(operand: str) -> bool:
+    """Is this `LD (x),r` operand a register-indirect address, not a name?"""
+    return bool(_INDIRECT_OPERAND_RE.match(operand))
+
+
 def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
     """
     Remove dead stores (stores to variables that are immediately overwritten).
@@ -854,16 +874,33 @@ def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[lis
             reg = store_match.group(2)
             size = 3 if reg == 'HL' else 3  # LD (nn),HL = 3, LD (nn),A = 3
 
+            if _is_indirect(var):
+                # `LD (DE),A` addresses whatever DE holds, so it is not a
+                # store to a variable called "DE" and two of them are not
+                # two stores to one place. Taking the operand text as a
+                # name is what deleted the live `a[0] := 7` in
+                # `a[0] := 7; a[1] := 3`. It can also land on any variable
+                # tracked here, so nothing pending survives it.
+                pending_stores = {}
+                result.append(line)
+                i += 1
+                continue
+
             if var in pending_stores:
                 # Previous store to same var - it's dead!
                 prev_idx, prev_size = pending_stores[var]
-                # Remove the previous store from result
-                # Find and remove it
-                for j in range(len(result) - 1, -1, -1):
-                    if result[j].strip().startswith(f'LD\t({var})'):
-                        result.pop(j)
-                        total_savings += prev_size
-                        break
+                # prev_idx is where that store sits in `result`, recorded
+                # before it was appended. Indexing beats re-scanning for
+                # the text, which found the wrong line when a variable was
+                # stored to more than twice.
+                if result[prev_idx].strip().startswith('LD\t(%s),' % var):
+                    result.pop(prev_idx)
+                    total_savings += prev_size
+                    # Every later store shifted down one.
+                    pending_stores = {
+                        v: (idx - 1 if idx > prev_idx else idx, sz)
+                        for v, (idx, sz) in pending_stores.items()
+                    }
 
             # Record this store as pending
             pending_stores[var] = (len(result), size)
@@ -875,8 +912,14 @@ def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[lis
         read_match = re.match(r'LD\s+(A|HL|DE|BC),\(([^)]+)\)$', stripped)
         if read_match:
             var = read_match.group(2)
-            # This var is read - remove from pending (store was not dead)
-            if var in pending_stores:
+            if _is_indirect(var):
+                # `LD A,(HL)` may read any variable, including one with a
+                # store pending, so that store is not dead. This branch
+                # used to fall through and delete only "HL" from the map,
+                # which is a name no real variable has.
+                pending_stores = {}
+            elif var in pending_stores:
+                # This var is read - remove from pending (store was not dead)
                 del pending_stores[var]
             result.append(line)
             i += 1
@@ -884,7 +927,7 @@ def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[lis
 
         # Any other instruction that might use memory indirectly
         # For safety, clear all pending stores on complex instructions
-        if 'LDIR' in stripped or 'LDDR' in stripped or '(HL)' in stripped:
+        if (_BLOCK_OP_RE.search(stripped) or _INDIRECT_REF_RE.search(stripped)):
             pending_stores = {}
 
         result.append(line)
