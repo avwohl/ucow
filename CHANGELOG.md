@@ -3,6 +3,58 @@
 Notable changes to ucow, a Cowgol compiler targeting 8080/Z80 CP/M.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+Repository only — no release. Neither the wheel nor the sdist contains
+`run_tests.sh` or the file removed below, so the distributed package is
+byte-identical to 0.4.3 and there is nothing to publish.
+
+### Fixed
+
+- **`run_tests.sh` can assemble again, and it runs the right runtime.**
+  It assembled from `$TESTS_DIR`, where the generated
+  `INCLUDE 'runtime.mac'` resolves to nothing, so every test failed at
+  the assemble step. It now passes `-I "$UCOW_DIR/lib"`.
+
+  The include path also decides *which* runtime, which mattered more
+  than the missing one. A stale `runtime.mac` sat at the repo root whose
+  `print_i16` took its argument on the stack at `SP+8`, while codegen
+  has passed it in `HL` for a long time. Anything that assembled from
+  the repo root therefore linked cleanly and printed garbage —
+  `hello.cow` emitted `C~` rather than `Hello, World!` — with no
+  diagnostic anywhere. That copy has one commit against it and never
+  received the print-combining work, so it also lacked `print_i16_nl`,
+  `print_a_nl` and `print_de_nl`, which the post-assembly optimizer
+  emits whenever a `print` is followed by a `print_nl`. It is deleted.
+  `lib/runtime.mac` is the real one: it is what `CLAUDE.md` documents,
+  what the wheel ships, what `test.sh` copies, it takes its argument in
+  `HL`, and it has had all three combined helpers since before 0.3.0.
+
+  Assembling from the repo root now fails with "Cannot find include
+  file: runtime.mac" instead of producing a wrong program quietly. Pass
+  `-I lib`.
+
+- **`run_tests.sh` finds cpmemu.** The path was hardcoded to one Linux
+  developer checkout, so the script could not run anywhere else. It
+  takes `cpmemu` from `PATH`, where `pip install cpmemu` puts it, and
+  `$CPMEMU` still overrides for a build that is not installed. Missing
+  is now a clear message rather than a failure attributed to each test
+  in turn.
+
+  12 of the 13 tests pass. `asm_test` fails to assemble, which is
+  neither of the faults above: it writes 8080 mnemonics — `lxi`,
+  `shld`, `mvi` — into a module codegen marks `.Z80`, so the assembler
+  rejects them. The test was added in the first commit and `.Z80` came
+  later, so it has never passed; it was invisible while nothing
+  assembled at all. Whether `@asm` should accept 8080 syntax, or the
+  test should be rewritten in Z80 mnemonics, is a decision left open.
+
+### Still open from 0.4.0
+
+`CLAUDE.md` and `OPTIMIZATION_STRATEGY.md` still list the deleted
+`src/lexer.py`.
+
+
 ## 0.4.3
 
 An unknown escape sequence is an error again, in both string and
@@ -47,11 +99,10 @@ repository still parse.
 ### Still open from 0.4.0
 
 `CLAUDE.md` and `OPTIMIZATION_STRATEGY.md` still list the deleted
-`src/lexer.py`. The two faults older than the migration also stand:
-`run_tests.sh` assembles from `tests/` without an include path, so
-`runtime.mac` at the repo root is not found, and `runtime.mac` defines
-neither `print_de_nl` nor `print_i16_nl`, which the optimizer emits
-whenever a `print` is followed by a `print_nl`.
+`src/lexer.py`. The two faults older than the migration also stand here
+and are fixed under Unreleased above: `run_tests.sh` assembles from
+`tests/` without an include path, and the stale `runtime.mac` at the
+repo root lacks the combined print helpers.
 
 
 ## 0.4.2

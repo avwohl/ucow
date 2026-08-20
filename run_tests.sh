@@ -2,8 +2,21 @@
 # Test runner for ucow compiler
 
 UCOW_DIR="$(cd "$(dirname "$0")" && pwd)"
-CPMEMU="/home/wohl/cl/cpmemu/src/cpmemu"
 TESTS_DIR="$UCOW_DIR/tests"
+
+# The runtime the generated `INCLUDE 'runtime.mac'` resolves to. It has
+# to be named explicitly: the assembler runs in $TESTS_DIR, and there is
+# no runtime.mac there. Point it at lib/, which is the copy the wheel
+# ships and the one the compiler is written against.
+LIB_DIR="$UCOW_DIR/lib"
+
+# cpmemu installs as a console script (`pip install cpmemu`), so take it
+# from PATH. $CPMEMU still overrides, for a build that is not installed.
+CPMEMU="${CPMEMU:-$(command -v cpmemu)}"
+if [ -z "$CPMEMU" ]; then
+    echo "cpmemu not found: install it, or set CPMEMU to the binary" >&2
+    exit 1
+fi
 
 # Colors for output
 RED='\033[0;31m'
@@ -27,7 +40,7 @@ for test in $TESTS; do
     fi
 
     # Assemble
-    if ! (cd "$TESTS_DIR" && um80 "${test}.mac" >/dev/null 2>&1); then
+    if ! (cd "$TESTS_DIR" && um80 -I "$LIB_DIR" "${test}.mac" >/dev/null 2>&1); then
         echo -e "${RED}FAIL${NC} (assemble error)"
         ((FAILED++))
         continue
