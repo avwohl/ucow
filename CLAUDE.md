@@ -40,21 +40,35 @@ python3 ucow main.cow \
 
 ### Testing
 ```bash
-# Run tests
+# The whole suite
+./run_tests.sh
+
+# Or one test by hand. -I ../lib is what resolves the generated
+# INCLUDE 'runtime.mac'; without it the assemble step fails.
+python3 ucow tests/hello.cow -o tests/hello.mac -I tests
 cd tests
-python3 ../ucow test.cow -o test.mac
-um80 test.mac
-ul80 test.rel -o test.com
-cpmemu test.com
+um80 -I ../lib hello.mac
+ul80 hello.rel -o hello.com
+cpmemu hello.com
 ```
 
 ## Code Structure
-- `src/lexer.py` - Tokenizer
-- `src/parser.py` - Parser producing AST
-- `src/types.py` - Type checker and semantic analysis
-- `src/codegen.py` - 8080 assembly code generator
-- `src/preprocessor.py` - Include file handling
+There is no hand-written lexer. 0.4.0 replaced it and the
+recursive-descent parser with an LALR(1) parser uplox generates from
+`cowgol_ast.uplox`; `src/parser.py` is now the translator between that
+parser's AST and this one's.
+
+- `src/uplox_cowgol.py` - Generated scanner and parser (do not edit; regenerate)
+- `src/parser.py` - Translates the generated AST into `src/ast.py` nodes
 - `src/ast.py` - AST node definitions
+- `src/tokens.py` - `SourceLocation`, all that outlived the old lexer
+- `src/preprocessor.py` - Include file handling
+- `src/types.py` - Type checker and semantic analysis
+- `src/optimizer.py` - AST-level optimization passes, before code generation
+- `src/callgraph.py` - Which subroutines can share local storage
+- `src/codegen.py` - 8080 assembly code generator
+- `src/postopt.py` - Peephole pass over the generated `.mac`
+- `src/main.py` - Driver
 - `lib/runtime.mac` - Runtime support routines
 - `cowgol_compat/` - Generated files for Cowgol compatibility (parser.coh, etc.)
 

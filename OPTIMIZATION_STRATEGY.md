@@ -468,22 +468,32 @@ Run program, collect execution counts, optimize hot paths.
 
 ## File Structure
 
+The layout this document planned for. It is not what the tree looks
+like — `semantic.py`, `cfg.py`, `dataflow.py` and `regalloc.py` were
+never written, the work they name living inside `types.py`,
+`optimizer.py` and `codegen.py` instead; `optimize.py` is `optimizer.py`
+and `peephole.py` is `postopt.py`, which runs over the generated `.mac`
+rather than an IR. `lexer.py` is the one entry here that was built and
+is now gone: it ran from the first commit until 0.4.0 replaced the
+hand-written front end with a parser uplox generates. See `CLAUDE.md`
+for the tree as it stands.
+
 ```
 ucow/
 ├── COWGOL_LANGUAGE.md      # Language reference
 ├── OPTIMIZATION_STRATEGY.md # This document
 ├── src/
-│   ├── lexer.py            # Tokenizer
-│   ├── parser.py           # AST builder
+│   ├── lexer.py            # Tokenizer          (built, deleted in 0.4.0)
+│   ├── parser.py           # AST builder        (now a translator)
 │   ├── ast.py              # AST node definitions
 │   ├── types.py            # Type system
-│   ├── semantic.py         # Type checking, validation
-│   ├── cfg.py              # Control flow graph
-│   ├── dataflow.py         # Dataflow analysis
-│   ├── optimize.py         # Optimization passes
-│   ├── regalloc.py         # Register allocation
+│   ├── semantic.py         # Type checking, validation   (folded into types.py)
+│   ├── cfg.py              # Control flow graph          (never built)
+│   ├── dataflow.py         # Dataflow analysis           (never built)
+│   ├── optimize.py         # Optimization passes         (built as optimizer.py)
+│   ├── regalloc.py         # Register allocation         (never built)
 │   ├── codegen.py          # 8080 code generation
-│   ├── peephole.py         # Peephole optimizer
+│   ├── peephole.py         # Peephole optimizer          (built as postopt.py)
 │   └── main.py             # Driver
 ├── lib/
 │   └── runtime.mac         # Runtime support (print, etc.)

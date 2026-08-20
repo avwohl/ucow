@@ -59,10 +59,30 @@ package is byte-identical to 0.4.3 and there is nothing to publish.
   `print_i16` read it back, and `Direct BDOS call: A`, so the raw BDOS
   console-output call ran.
 
-### Still open from 0.4.0
+### Documentation
 
-`CLAUDE.md` and `OPTIMIZATION_STRATEGY.md` still list the deleted
-`src/lexer.py`.
+- **The docs no longer describe the deleted front end.** `CLAUDE.md`'s
+  Code Structure listed `src/lexer.py` and stopped at six modules; it
+  now names the twelve that exist, says which one is generated and must
+  not be hand-edited, and leads with the fact that there is no
+  hand-written lexer. Its Testing recipe was broken three ways — it
+  compiled a `tests/test.cow` that does not exist, assembled without the
+  `-I` that resolves `runtime.mac`, and predated `run_tests.sh` working
+  — and is replaced by a sequence that was run as written.
+
+- **`OPTIMIZATION_STRATEGY.md`'s file tree is marked as the plan it
+  is.** Seven of the twelve modules it lists were never built, and it
+  omits seven that were, so read as a description it was wrong about
+  more than the lexer. Each entry now says what became of it.
+  `lexer.py` is annotated as built and deleted in 0.4.0, which is what
+  separates it from `cfg.py` or `regalloc.py`, which never existed.
+
+- **The README's Requirements are accurate.** It asked for "Python 3"
+  and did not mention uplox, which the generated parser imports at run
+  time; ucow has needed Python 3.11 and `uplox>=3.3.0` since 0.4.0.
+
+This closes 0.4.0's Known regressions. Every entry there is now either
+fixed or recorded against the release that fixed it.
 
 
 ## 0.4.3
@@ -442,7 +462,8 @@ the migration.
   Character literals are unaffected — the uplox scanner still rejects
   `'\q'`, as `lexical error at byte 0x27`.
 
-- **Docs still describe the old front end.** `CLAUDE.md` and
+- **Docs still describe the old front end.** (Fixed after 0.4.3; see
+  Unreleased.) `CLAUDE.md` and
   `OPTIMIZATION_STRATEGY.md` list `src/lexer.py` in the source tree, the
   README still documents `--tokens`, and the README's Requirements list
   still says only "Python 3", with no mention of uplox.
