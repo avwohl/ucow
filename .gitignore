@@ -17,3 +17,7 @@ tests/*.cfg
 !tests/ucow_test.cfg
 # Captured program output, written by run_tests.sh for the diff.
 tests/*.out
+# publish.yml builds into dist/ and pypa/gh-action-pypi-publish uploads
+# everything it finds there. Two stale 0.2.0 artifacts were tracked, so
+# every release re-uploaded them to PyPI alongside the real ones.
+dist/

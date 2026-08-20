@@ -29,13 +29,16 @@ was written, so every release up to and including 0.4.4 carries it.
   printed `a0 0 sum 3` — the 7 gone — where `--no-post-opt` gave the
   correct `a0 7 sum 10`. Exit 0, no diagnostic, wrong program.
 
-  Two more faults of the same shape were found while fixing it, both
-  reachable the same way:
+  Two more faults of the same shape were found while fixing it. One is
+  reachable from compiler output; the other is hardening:
 
   `LD (HL),A` matched that regex too, so it was tracked as a store to a
   variable called "HL". The `'(HL)' in stripped` guard further down was
   meant to prevent exactly this and never ran, because the store branch
-  matched first and continued past it.
+  matched first and continued past it. No codegen path emits
+  `LD (HL),A` today — a byte store through a pointer comes out as
+  `LD (HL),E` or `LD (HL),D`, which the regex never matched — so this
+  one was latent rather than live, and is fixed as hardening.
 
   `LD A,(HL)` matched the *read* regex, so a read through a register
   pair only removed "HL" from the pending map — a name no variable
@@ -51,10 +54,13 @@ was written, so every release up to and including 0.4.4 carries it.
   reference — `INC (HL)`, `EX (SP),HL`, `ADD A,(IX+2)` — and to the
   block compare and block I/O instructions alongside the block moves.
 
-  The pass is not weakened in practice: across all sixteen `.cow`
-  programs under `tests/`, the fix costs exactly one instruction, the
-  one that was being wrongly deleted. Every `.com` is byte-for-byte the
-  size it was.
+  The pass is not weakened in practice: across the seventeen `.cow`
+  programs under `tests/`, the fix costs five instructions — four in the
+  new `dead_store_test` and one in `test_all` — and every one of them is
+  an `LD (DE),A` that was being wrongly deleted. Across the sixteen
+  programs that existed before this release, the cost is one. Every
+  `.com` comes out the same size, because `ul80` pads to 128-byte CP/M
+  records and that absorbs the three extra bytes.
 
 - **The removal is by index rather than by re-scanning for the text.**
   Having decided a store was dead, the pass searched `result` backwards
@@ -78,11 +84,15 @@ was written, so every release up to and including 0.4.4 carries it.
   was not in `TESTS`, so that baseline sat red and unrun while the suite
   reported everything green.
 
-- **`tests/dead_store_test.cow`** and its baseline, covering all three
-  faults directly: consecutive `uint8` and `uint16` element stores, and
-  a store followed by an indirect read and another store. Both it and
-  `test_all` fail against the 0.4.4 pass and pass against this one,
-  which is how the fix was checked.
+- **`tests/dead_store_test.cow`** and its baseline, covering the two
+  faults compiler output can reach: consecutive `uint8` element stores,
+  and a store followed by an indirect read and another store. The
+  `uint16` element stores in it compile to `LD (HL),E / INC HL /
+  LD (HL),D`, which never matched the buggy regex — they are a guard,
+  not coverage — and the `LD (HL),A` fault has no test because nothing
+  emits that instruction. All four stores this test restores are
+  `LD (DE),A`. Both it and `test_all` fail against the 0.4.4 pass and
+  pass against this one, which is how the fix was checked.
 
 The suite is 15 passed, 0 failed.
 
