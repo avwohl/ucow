@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "A Cowgol compiler for 8080/Z80 CP/M"
 readme = "README.md"
 license = "GPL-2.0-only"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 authors = [
     { name = "David Given" }
 ]
@@ -19,14 +19,21 @@ classifiers = [
     "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Compilers",
 ]
 keywords = ["cowgol", "compiler", "8080", "z80", "cpm"]
+
+# src/uplox_cowgol.py imports uplox.lex.scanner and uplox.parse.runtime at
+# module level, so the generated parser cannot load without it. 0.3.0 had no
+# dependency here because the front end was self-contained; 0.4.0 replaced it
+# with a uplox-generated one. uplox itself requires Python 3.11, which is what
+# sets requires-python above.
+dependencies = [
+    "uplox>=3.3.0",
+]
 
 [project.scripts]
 ucow = "src.main:main"
