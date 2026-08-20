@@ -3,6 +3,93 @@
 Notable changes to ucow, a Cowgol compiler targeting 8080/Z80 CP/M.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.4.1
+
+The three nested-declaration regressions 0.4.0 shipped are fixed, and so
+is `--tokens`. Nothing here changes the code generated for anything that
+already compiled: all 14 `.cow` programs directly under `tests/` produce
+byte-identical `.mac` output under 0.4.0 and 0.4.1.
+
+The root cause was one omission with three faces. A sub body is a list
+of statements, but Cowgol lets a `record`, `typedef` or `interface`
+declaration sit in one, and `ast.py` models all three as `Declaration`
+rather than `Statement`. The pre-v3 parser simply appended the
+Declaration node to the body list and left `types.py` and `codegen.py`
+to dispatch on it there, which they have always done. The v3 translator
+kept only the nested-`sub` case.
+
+### Fixed
+
+- **`record` and `typedef` declarations nested inside a subroutine body
+  translate again.** `_translate_stmt_or_nested` had a branch for a
+  nested `sub` and one for a nested `interface`, but none for
+  `RecordDecl` or `TypedefDecl`, so both fell through to
+  `_translate_statement` and raised
+  `internal: cannot translate statement of kind RecordDecl`. That is
+  what stopped `cowgol_compat/inssel.coh` — which ships inside the
+  wheel — from parsing at all: it declares `record NodeSlot` inside
+  `EmitOneInstruction` at line 786.
+
+  The fix puts `ast.RecordDecl` and `ast.TypedefDecl` straight into the
+  body list, which is what the pre-v3 recursive-descent parser did
+  (`_parse_record` and `_parse_typedef` were appended to `body` from the
+  sub-body loop). Nothing downstream needed changing: `types.py`has
+  dispatched on both in `check_statement` since long before the
+  migration, and `codegen.py` skips them there. `inssel.coh` now parses
+  to 92 top-level declarations, and a nested `record` plus `typedef`
+  compiles through to assembly that `um80` and `ul80` accept.
+
+- **A nested `interface` declaration keeps its contents.** 0.4.0
+  translated it to `ast.NestedSubStmt(sub=None)` as a deliberate
+  placeholder, which discarded the interface's name, parameters and
+  returns, and left anything reading `.sub` to raise `AttributeError:
+  'NoneType' object has no attribute 'is_impl'` rather than report a
+  diagnostic — so a sub containing one could not be compiled at all. It
+  now translates through the same `_translate_interface_decl` the top
+  level uses, producing a real `ast.InterfaceDecl` in the body list, as
+  0.3.0 did. `types.py` already dispatched on it in statement position;
+  `codegen.py` now names it alongside `RecordDecl` and `TypedefDecl` in
+  the branch that emits nothing for a type declaration, which is what it
+  was already doing by falling off the end of the chain.
+
+- **`--tokens` works again**, on a new `parser.scan_tokens()` that runs
+  the uplox scanner alone. The old handler called
+  `Lexer(source, input_files[0])`, and `Lexer` went with `src/lexer.py`
+  in 0.4.0, so the flag died with
+  `NameError: name 'Lexer' is not defined`.
+
+  The output format is different, because the tokens are. Pre-v3 ucow
+  printed a `TokenType` name and the parsed value, `ID(msg)`; the uplox
+  scanner yields a terminal name and the raw lexeme, and the dump now
+  carries the position as well:
+
+      hello.cow:3:5: IDENT 'msg'
+
+  As before, the file is scanned as written — no preprocessing — and
+  whitespace and comments never appear, since the grammar puts them in
+  the scanner's skip set. A lexical error is reported through
+  `ParseError` and exits 1 instead of raising.
+
+### Added
+
+- `tests/nested_decl_test.cow`, which declares a `record` and a
+  `typedef` inside a subroutine and uses both. No program under `tests/`
+  exercised the construct, which is why the suite did not catch the
+  0.4.0 breakage. It is in `run_tests.sh`'s list.
+
+### Still open from 0.4.0
+
+One entry under 0.4.0's Known regressions stands: every syntax error is
+still labelled `Lexer error:`, because `LexerError` is an alias of
+`ParseError` and its `except` arm comes first. Two faults older than the
+migration also stand
+and are worth knowing about before running `run_tests.sh`: it assembles
+from `tests/` without an include path, so `runtime.mac` at the repo root
+is not found, and `runtime.mac` defines neither `print_de_nl` nor
+`print_i16_nl`, which the optimizer emits whenever a `print` is followed
+by a `print_nl` — `tests/record.cow` hits both.
+
+
 ## 0.4.0
 
 The hand-written lexer and recursive-descent parser are gone. `.cow`
@@ -139,7 +226,7 @@ These are real and confirmed by running 0.3.0 and 0.4.0 side by side.
 They are not deliberate removals; treat them as the outstanding cost of
 the migration.
 
-- **`--tokens` crashes.** The flag is still accepted and still
+- **`--tokens` crashes.** (Fixed in 0.4.1.) The flag is still accepted and still
   documented in the README, but its handler in `src/main.py` calls
   `Lexer(source, input_files[0])` and `Lexer` no longer exists, so
   `ucow --tokens foo.cow` dies with
@@ -148,7 +235,7 @@ the migration.
   `parse_string`.
 
 - **`record` and `typedef` declarations nested inside a subroutine body
-  are rejected.** The grammar admits them — `<sub_body_item>` lists
+  are rejected.** (Fixed in 0.4.1.) The grammar admits them — `<sub_body_item>` lists
   `<record_decl>` and `<typedef_decl>` — but the translator's
   `_translate_stmt_or_nested` has no branch for either, so they fall
   through to `_translate_statement` and raise
@@ -160,7 +247,7 @@ the migration.
   fails on that header where 0.3.0 parsed it.
 
 - **`interface` declarations nested inside a subroutine body lose their
-  contents.** 0.3.0 produced an `ast.InterfaceDecl` in the body list;
+  contents.** (Fixed in 0.4.1.) 0.3.0 produced an `ast.InterfaceDecl` in the body list;
   0.4.0 produces `NestedSubStmt(sub=None)` as a deliberate placeholder,
   so the interface name, parameters, and returns are all discarded and
   any consumer that dereferences `.sub` gets an `AttributeError` on

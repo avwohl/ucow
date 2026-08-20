@@ -1,0 +1,43 @@
+# Record, typedef and interface declarations nested inside a subroutine
+# body.
+#
+# Regression test for 0.4.1. The v3 parser translator handled a nested
+# `sub` but none of the other three, so this file failed with
+# "internal: cannot translate statement of kind RecordDecl" -- which is
+# what stopped cowgol_compat/inssel.coh from parsing -- and a nested
+# `interface` came back as NestedSubStmt(sub=None), which crashed
+# codegen with AttributeError on 'is_impl'.
+#
+# print_nl() is avoided on purpose: the optimizer folds print/print_nl
+# pairs into print_de_nl and print_i16_nl, which runtime.mac does not
+# define, so any test using that pair fails to assemble. That is a
+# separate fault and tests/record.cow hits it too.
+
+sub Report() is
+    record Slot is
+        tag: uint16;
+        val: uint16;
+    end record;
+
+    typedef Small is uint16;
+
+    interface Combine(a: uint16, b: uint16): (c: uint16);
+
+    var s: Slot;
+    var n: Small;
+
+    s.tag := 3;
+    s.val := 40;
+    n := s.tag + s.val;
+
+    print("tag=");
+    print_i16(s.tag);
+    print(" val=");
+    print_i16(s.val);
+    print(" sum=");
+    print_i16(n);
+    print("\r\n");
+end sub;
+
+print("Nested declaration test:\r\n");
+Report();

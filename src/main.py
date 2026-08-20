@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from typing import List
 
-from .parser import Parser, ParseError, parse_file, parse_string
+from .parser import Parser, ParseError, parse_file, parse_string, scan_tokens
 
 # Pre-v3 ucow had a separate LexerError. After the uplox migration
 # lexical errors come through as ParseError too, so keep the name
@@ -377,11 +377,18 @@ def main():
     is_multi_file = len(input_files) > 1 or args.workspace_opt
 
     if args.tokens:
-        # Token dump mode (single file only)
+        # Token dump mode (single file only). The file is scanned as
+        # written, without preprocessing, which is what --tokens did
+        # before the uplox migration.
         source = Path(input_files[0]).read_text()
-        lexer = Lexer(source, input_files[0])
-        for token in lexer.tokenize():
-            print(token)
+        try:
+            tokens = scan_tokens(source, input_files[0])
+        except (LexerError, ParseError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        for token in tokens:
+            print(f"{input_files[0]}:{token.line}:{token.column}: "
+                  f"{token.name} {token.text!r}")
         return 0
 
     if args.ast:

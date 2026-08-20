@@ -97,6 +97,24 @@ def parse_string(source: str, filename: str = "<input>") -> _ast.Program:
     return _translate(v3_root, filename)
 
 
+def scan_tokens(source: str, filename: str = "<input>") -> List[Any]:
+    """Run only the lexer over ``source`` and return the tokens.
+
+    Backs ``ucow --tokens``. These are uplox ``Token`` objects — ``name``,
+    ``text``, ``line``, ``column`` — not the pre-v3 ucow ``Token``, whose
+    ``TokenType`` enum went with ``src/lexer.py``. Whitespace and comments
+    are already dropped: they are in the grammar's skip set, so the scanner
+    never yields them.
+    """
+    from uplox.lex.scanner import ScanError
+
+    try:
+        return list(_ucg.scan(source))
+    except ScanError as e:
+        loc = SourceLocation(filename, getattr(e, "line", 1), getattr(e, "column", 1))
+        raise ParseError(str(e), loc) from e
+
+
 class Parser:
     """Compatibility shim — wraps :func:`parse_string` over a source string.
 
@@ -303,22 +321,34 @@ def _translate_stmt_list(items: Any, filename: str) -> list[_ast.Statement]:
     return out
 
 
-def _translate_stmt_or_nested(v: Any, filename: str) -> Optional[_ast.Statement]:
-    """A sub_body_item is either a stmt, a sub_form (nested), or an interface decl."""
+def _translate_stmt_or_nested(v: Any, filename: str) -> Optional[_ast.Node]:
+    """A sub_body_item is a stmt, a nested sub_form, a nested record or
+    typedef declaration, or an interface decl.
+
+    Records and typedefs come back as the ``Declaration`` nodes
+    ``ast.RecordDecl`` / ``ast.TypedefDecl`` rather than statements, so a
+    body list can hold both. That is not new: the pre-v3 recursive-descent
+    parser appended the same two Declaration nodes straight into the body,
+    and ``types.py`` and ``codegen.py`` have always dispatched on them
+    there. Only the translator lost the case in 0.4.0, which is what made
+    the bundled ``cowgol_compat/inssel.coh`` stop parsing — it declares
+    ``record NodeSlot`` inside ``EmitOneInstruction``.
+    """
     if isinstance(v, (_ucg.SubDecl, _ucg.SubForwardDecl, _ucg.SubImpl)):
         return _ast.NestedSubStmt(
             location=_loc(filename, v),
             sub=_translate_sub(v, filename),
         )
-    if isinstance(v, _ucg.InterfaceDecl):
-        # No NestedInterfaceStmt in ucow; the pre-uplox parser also
-        # admitted nested interface decls but downstream rarely uses
-        # them. Emit a marker-style NestedSubStmt with sub=None as the
-        # closest match; consumers that don't expect it will fail loudly.
-        return _ast.NestedSubStmt(
+    if isinstance(v, _ucg.RecordDecl):
+        return _translate_record_decl(v, filename)
+    if isinstance(v, _ucg.TypedefDecl):
+        return _ast.TypedefDecl(
             location=_loc(filename, v),
-            sub=None,  # type: ignore[arg-type]
+            name=v.name.text,
+            type=_translate_type(v.type, filename),
         )
+    if isinstance(v, _ucg.InterfaceDecl):
+        return _translate_interface_decl(v, filename)
     return _translate_statement(v, filename)
 
 

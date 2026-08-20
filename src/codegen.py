@@ -1232,7 +1232,8 @@ class CodeGenerator:
         elif isinstance(stmt, ast.SubDecl):
             self.gen_sub(stmt)
 
-        elif isinstance(stmt, (ast.RecordDecl, ast.TypedefDecl)):
+        elif isinstance(stmt, (ast.RecordDecl, ast.TypedefDecl,
+                               ast.InterfaceDecl)):
             # Type declarations don't generate code
             pass
 
