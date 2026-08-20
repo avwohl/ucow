@@ -69,6 +69,7 @@ parser's AST and this one's.
 - `src/codegen.py` - 8080 assembly code generator
 - `src/postopt.py` - Peephole pass over the generated `.mac`
 - `src/main.py` - Driver
+- `src/__init__.py` - `__version__`, which `[tool.hatch.version]` reads
 - `lib/runtime.mac` - Runtime support routines
 - `cowgol_compat/` - Generated files for Cowgol compatibility (parser.coh, etc.)
 

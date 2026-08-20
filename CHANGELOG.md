@@ -3,11 +3,18 @@
 Notable changes to ucow, a Cowgol compiler targeting 8080/Z80 CP/M.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.4.4
 
-Repository only — no release. Neither the wheel nor the sdist contains
-`run_tests.sh`, `tests/`, or the file removed below, so the distributed
-package is byte-identical to 0.4.3 and there is nothing to publish.
+No compiler change: the only difference under `src/` is the version
+bump in `src/__init__.py`. What reaches an installed package is
+otherwise just the README, which `pyproject.toml`
+names as the project's `readme`, so it is embedded in the wheel's
+`METADATA` and the sdist's `PKG-INFO` and is what renders on the PyPI
+project page. Until now that page asked for "Python 3" and did not
+mention uplox, which is wrong twice over for anything since 0.4.0.
+
+The rest below is the repository — the test runner, the test suite, and
+the developer docs — and ships in neither the wheel nor the sdist.
 
 ### Fixed
 
@@ -65,7 +72,7 @@ package is byte-identical to 0.4.3 and there is nothing to publish.
 
 - **The docs no longer describe the deleted front end.** `CLAUDE.md`'s
   Code Structure listed `src/lexer.py` and stopped at six modules; it
-  now names the twelve that exist, says which one is generated and must
+  now names all twelve `.py` files under `src/`, says which one is generated and must
   not be hand-edited, and leads with the fact that there is no
   hand-written lexer. Its Testing recipe was broken three ways — it
   compiled a `tests/test.cow` that does not exist, assembled without the
@@ -73,8 +80,9 @@ package is byte-identical to 0.4.3 and there is nothing to publish.
   — and is replaced by a sequence that was run as written.
 
 - **`OPTIMIZATION_STRATEGY.md`'s file tree is marked as the plan it
-  is.** Seven of the twelve modules it lists were never built, and it
-  omits seven that were, so read as a description it was wrong about
+  is.** Six of the twelve modules it lists were never built and a
+  seventh, `lexer.py`, was built and later deleted; it also omits seven
+  files that do exist. Read as a description it was wrong about far
   more than the lexer. Each entry now says what became of it.
   `lexer.py` is annotated as built and deleted in 0.4.0, which is what
   separates it from `cfg.py` or `regalloc.py`, which never existed.
@@ -82,9 +90,49 @@ package is byte-identical to 0.4.3 and there is nothing to publish.
 - **The README's Requirements are accurate.** It asked for "Python 3"
   and did not mention uplox, which the generated parser imports at run
   time; ucow has needed Python 3.11 and `uplox>=3.3.0` since 0.4.0.
+  This is the part of the release that reaches an installed package:
+  the README is the project's `readme`, so it is the PyPI page.
+
+- **A blank line before `## Related Projects`.** It followed the last
+  Requirements bullet directly. This is source tidiness and nothing
+  more: an ATX heading interrupts a paragraph under CommonMark, so it
+  already rendered as a heading. Checked by running both versions
+  through `readme_renderer[md]` with cmarkgfm, which is what PyPI
+  itself uses — the HTML is byte-identical either way.
 
 This closes 0.4.0's Known regressions. Every entry there is now either
 fixed or recorded against the release that fixed it.
+
+### Known issue
+
+Not introduced here — it is in 0.4.3 and earlier too, and `src/` is
+unchanged in this release — but it was found while verifying 0.4.4 and
+is worth knowing before you upgrade into it.
+
+**The post-assembly dead-store pass deletes a live store to a byte
+array.** `dead_store_elimination` in `src/postopt.py` matches
+`LD (<operand>),A` and takes the operand text as a variable name, so two
+stores through the same register pair look like two stores to one
+variable and the first is dropped as dead. It guards `(HL)` but not
+`(DE)` or `(BC)`. So this:
+
+```
+var a: uint8[4];
+a[0] := 7;
+a[1] := 3;
+```
+
+prints `a0 0 sum 3` — the store of 7 is gone — where `--no-post-opt`
+gives the correct `a0 7 sum 10`. No diagnostic either way.
+
+The repository's own tracked baseline catches it: compiling and running
+`tests/test_all.cow` disagrees with `tests/test_expected.txt` on exactly
+one line. But `test_all` is not in `run_tests.sh`'s list, so the suite
+reports 13 of 13 while that baseline sits red and unrun. Fixing the
+pass, and adding `test_all` to the suite with a real diff against its
+expected output rather than the exit-status check the runner does now,
+is 0.4.5.
+
 
 ### Removed
 
@@ -143,7 +191,7 @@ repository still parse.
 
 `CLAUDE.md` and `OPTIMIZATION_STRATEGY.md` still list the deleted
 `src/lexer.py`. The two faults older than the migration also stand here
-and are fixed under Unreleased above: `run_tests.sh` assembles from
+and are fixed under 0.4.4 above: `run_tests.sh` assembles from
 `tests/` without an include path, and the stale `runtime.mac` at the
 repo root lacks the combined print helpers.
 
@@ -475,8 +523,8 @@ the migration.
   Character literals are unaffected — the uplox scanner still rejects
   `'\q'`, as `lexical error at byte 0x27`.
 
-- **Docs still describe the old front end.** (Fixed after 0.4.3; see
-  Unreleased.) `CLAUDE.md` and
+- **Docs still describe the old front end.** (Fixed in 0.4.4.)
+  `CLAUDE.md` and
   `OPTIMIZATION_STRATEGY.md` list `src/lexer.py` in the source tree, the
   README still documents `--tokens`, and the README's Requirements list
   still says only "Python 3", with no mention of uplox.
