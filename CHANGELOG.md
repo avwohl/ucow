@@ -26,9 +26,11 @@ package is byte-identical to 0.4.3 and there is nothing to publish.
   received the print-combining work, so it also lacked `print_i16_nl`,
   `print_a_nl` and `print_de_nl`, which the post-assembly optimizer
   emits whenever a `print` is followed by a `print_nl`. It is deleted.
-  `lib/runtime.mac` is the real one: it is what `CLAUDE.md` documents,
-  what the wheel ships, what `test.sh` copies, it takes its argument in
-  `HL`, and it has had all three combined helpers since before 0.3.0.
+  `lib/runtime.mac` is the real one: it is what `CLAUDE.md` documents
+  and what the wheel ships, it takes its argument in `HL`, and it has
+  had all three combined helpers since before 0.3.0. The now-deleted
+  `test.sh` copied it into `tests/` rather than trusting the root one,
+  which was the only thing in the repository that got this right.
 
   Assembling from the repo root now fails with "Cannot find include
   file: runtime.mac" instead of producing a wrong program quietly. Pass
@@ -83,6 +85,17 @@ package is byte-identical to 0.4.3 and there is nothing to publish.
 
 This closes 0.4.0's Known regressions. Every entry there is now either
 fixed or recorded against the release that fixed it.
+
+### Removed
+
+- **`test.sh`.** A second, older test script, unchanged since the first
+  commit and superseded by `run_tests.sh` in every respect. It could
+  not run: it invoked `python3 ucow.py`, and the driver is `ucow`. Its
+  other two habits are now handled properly elsewhere — it copied
+  `lib/runtime.mac` into `tests/` where `run_tests.sh` passes
+  `-I lib`, and it hardcoded `~/cl/cpmemu/src/cpmemu` where
+  `run_tests.sh` takes cpmemu from `PATH`. Nothing referenced it and it
+  shipped in neither the wheel nor the sdist.
 
 
 ## 0.4.3
