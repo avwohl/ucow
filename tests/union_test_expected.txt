@@ -1,0 +1,4 @@
+Union test:
+Set as_int to 0x1234
+as_int: 1234
+as_bytes (low byte): 52

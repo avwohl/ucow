@@ -1,0 +1,27 @@
+# A variable read by inline assembly, between two stores to it.
+#
+# Regression test for 0.4.6. codegen joins interpolated @asm parts with
+# tabs, so `@asm "ld a, (", v, ")"` reaches the post-assembly optimizer
+# as `ld a, (<TAB>v_v<TAB>)` -- lowercase, with whitespace inside the
+# operand. The dead-store pass matched raw uppercase text anchored with
+# $, so it did not recognise that as a read of v, decided the store
+# feeding it was dead, and deleted it. The first character below went
+# missing.
+#
+# print_nl() is avoided on purpose; see tests/nested_decl_test.cow.
+
+var v: uint8;
+
+v := 42;                    # '*'
+@asm "ld a, (", v, ")";
+@asm "ld e, a";
+@asm "ld c, 2";
+@asm "call 5";
+
+v := 65;                    # 'A'
+@asm "ld a, (", v, ")";
+@asm "ld e, a";
+@asm "ld c, 2";
+@asm "call 5";
+
+print("\r\n");

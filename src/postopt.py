@@ -815,24 +815,80 @@ def address_folding_pass(lines: list[str], verbose: bool = False) -> tuple[list[
     return result, total_savings
 
 
-# Operands of `LD (x),r` / `LD r,(x)` that address memory through a
-# register rather than naming a variable: (HL), (DE), (BC), (IX+d),
-# (IY-d), (SP). The address is whatever the register holds, so the
-# operand text carries no aliasing information at all.
-_INDIRECT_OPERAND_RE = re.compile(r'^\s*(HL|DE|BC|SP|IX|IY)\s*([-+][^)]*)?\s*$', re.I)
+# Everything below reads assembly as text, so it has to agree with the
+# assembler about what that text means. Two things follow from that.
+#
+# um80 resolves labels case-insensitively -- `JP foo` finds `Foo:` -- so
+# a variable's identity is its name lowercased, and two spellings are one
+# variable.
+#
+# And `@asm` interpolation joins its parts with tabs (codegen._emit_asm),
+# so a hand-written `@asm "ld a, (", x, ")"` arrives as
+# `ld a, (<TAB>v_x<TAB>)`: lowercase, and with whitespace inside the
+# operand. Matching the raw line against uppercase `$`-anchored patterns
+# missed it, and a read the pass does not see is a store it wrongly
+# believes is dead. Every pattern here runs against a canonical form
+# instead.
 
-# The same registers seen anywhere in an instruction's text, for the
-# catch-all: `INC (HL)`, `EX (SP),HL`, `ADD A,(IX+2)` all touch memory
-# the pass cannot account for.
-_INDIRECT_REF_RE = re.compile(r'\(\s*(HL|DE|BC|SP|IX|IY)\s*([-+][^)]*)?\s*\)', re.I)
+# Registers that can hold an address. An operand naming one is an
+# address, not a variable, and says nothing about which variable is
+# touched.
+_ADDR_REGS = r'HL|DE|BC|SP|IX|IY'
+
+_INDIRECT_OPERAND_RE = re.compile(r'^(?:%s)(?:[-+].*)?$' % _ADDR_REGS, re.I)
+_INDIRECT_REF_RE = re.compile(r'\(\s*(?:%s)\s*(?:[-+][^)]*)?\s*\)' % _ADDR_REGS, re.I)
 
 # Block moves, block compares and block I/O walk memory wholesale.
-_BLOCK_OP_RE = re.compile(r'\b(LD[ID]R?|CP[ID]R?|IN[ID]R?|OT[ID]R|OUT[ID])\b', re.I)
+_BLOCK_OP_RE = re.compile(r'\b(?:LD[ID]R?|CP[ID]R?|IN[ID]R?|OT[ID]R|OUT[ID])\b', re.I)
+
+# Anything that can leave this straight-line run. RET needs the optional
+# condition: `RET NZ` leaves on the taken path, so a store after it does
+# not kill one before it. RST and the interrupt returns leave too.
+_BARRIER_RE = re.compile(
+    r'^(?:JP|JR|CALL|DJNZ|RST|RETI|RETN)\b|^RET(?:\s+(?:NZ|Z|NC|C|PO|PE|P|M))?$',
+    re.I)
+
+# `LD (nn),HL` and `LD (nn),A` are the only absolute stores this pass
+# tracks; the width matters, because an 8-bit store does not overwrite
+# all of what a 16-bit store wrote.
+_STORE_RE = re.compile(r'^LD\s*\(([^)]*)\)\s*,\s*(HL|A)$', re.I)
+_STORE_WIDTH = {'hl': 2, 'a': 1}
+
+# Every absolute load, including the SP/IX/IY forms the old pattern
+# omitted (`LD IX,(nn)` is DD 2A nn nn, `LD SP,(nn)` is ED 7B nn nn).
+_READ_RE = re.compile(r'^LD\s*(A|B|C|D|E|H|L|HL|DE|BC|SP|IX|IY)\s*,\s*\(([^)]*)\)$', re.I)
 
 
-def _is_indirect(operand: str) -> bool:
-    """Is this `LD (x),r` operand a register-indirect address, not a name?"""
-    return bool(_INDIRECT_OPERAND_RE.match(operand))
+def _strip_comment(text: str) -> str:
+    """Drop a trailing `;` comment, ignoring one inside a quoted string."""
+    quote = None
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in '"\'':
+            quote = ch
+        elif ch == ';':
+            return text[:i]
+    return text
+
+
+def _canon(text: str) -> str:
+    """One spelling for a line: no comment, no redundant whitespace."""
+    return re.sub(r'\s+', ' ', _strip_comment(text)).strip()
+
+
+def _operand_key(operand: str) -> str:
+    """The variable a `(...)` operand names, or '' if it names none.
+
+    Whitespace is removed because `@asm` interpolation puts tabs inside
+    the parentheses, and the result is lowercased because um80 matches
+    labels that way.
+    """
+    name = re.sub(r'\s+', '', operand)
+    if not name or _INDIRECT_OPERAND_RE.match(name):
+        return ''
+    return name.lower()
 
 
 def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
@@ -840,94 +896,92 @@ def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[lis
     Remove dead stores (stores to variables that are immediately overwritten).
 
     Pattern: LD (var),r followed by LD (var),r without intervening read of var
+
+    A store is removed only when the pass can name the variable both
+    times and nothing between the two can read it. Anything it cannot
+    account for -- an address held in a register, an instruction it does
+    not recognise, a branch -- discards what is pending rather than being
+    assumed harmless.
     """
     result = []
     total_savings = 0
 
-    # Track pending stores: var -> (line_index, size_bytes)
+    # Track pending stores: var -> (line_index, size_bytes, width_bytes)
     pending_stores = {}
 
     i = 0
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
+        canon = _canon(stripped)
 
         # Skip empty lines and comments
-        if not stripped or stripped.startswith(';'):
+        if not canon:
             result.append(line)
             i += 1
             continue
 
-        # Labels and control flow reset tracking
-        if (stripped.endswith(':') or stripped.startswith('JP') or
-            stripped.startswith('JR') or stripped.startswith('CALL') or
-            stripped == 'RET' or stripped.startswith('DJNZ')):
+        # Labels and control flow reset tracking. A label may share its
+        # line with an instruction, so this cannot just test for a
+        # trailing colon.
+        if re.match(r'^[A-Za-z_.$?][\w.$?]*\s*:', canon) or _BARRIER_RE.match(canon):
             pending_stores = {}
             result.append(line)
             i += 1
             continue
 
         # Check for store to memory: LD (var),HL or LD (var),A
-        store_match = re.match(r'LD\s+\(([^)]+)\),(HL|A)$', stripped)
+        store_match = _STORE_RE.match(canon)
         if store_match:
-            var = store_match.group(1)
-            reg = store_match.group(2)
-            size = 3 if reg == 'HL' else 3  # LD (nn),HL = 3, LD (nn),A = 3
+            var = _operand_key(store_match.group(1))
+            width = _STORE_WIDTH[store_match.group(2).lower()]
+            size = 3  # LD (nn),HL and LD (nn),A are both 3 bytes
 
-            if _is_indirect(var):
+            if not var:
                 # `LD (DE),A` addresses whatever DE holds, so it is not a
-                # store to a variable called "DE" and two of them are not
-                # two stores to one place. Taking the operand text as a
-                # name is what deleted the live `a[0] := 7` in
-                # `a[0] := 7; a[1] := 3`. It can also land on any variable
-                # tracked here, so nothing pending survives it.
+                # store to a variable called "DE" and it may land on any
+                # variable tracked here.
                 pending_stores = {}
                 result.append(line)
                 i += 1
                 continue
 
-            if var in pending_stores:
-                # Previous store to same var - it's dead!
-                prev_idx, prev_size = pending_stores[var]
-                # prev_idx is where that store sits in `result`, recorded
-                # before it was appended. Indexing beats re-scanning for
-                # the text, which found the wrong line when a variable was
-                # stored to more than twice.
-                if result[prev_idx].strip().startswith('LD\t(%s),' % var):
+            prev = pending_stores.get(var)
+            # An 8-bit store leaves the high byte of a 16-bit store
+            # standing, so it does not make that store dead.
+            if prev is not None and width >= prev[2]:
+                prev_idx, prev_size, _ = prev
+                if _STORE_RE.match(_canon(result[prev_idx])):
                     result.pop(prev_idx)
                     total_savings += prev_size
-                    # Every later store shifted down one.
                     pending_stores = {
-                        v: (idx - 1 if idx > prev_idx else idx, sz)
-                        for v, (idx, sz) in pending_stores.items()
+                        v: (idx - 1 if idx > prev_idx else idx, sz, w)
+                        for v, (idx, sz, w) in pending_stores.items()
                     }
 
             # Record this store as pending
-            pending_stores[var] = (len(result), size)
+            pending_stores[var] = (len(result), size, width)
             result.append(line)
             i += 1
             continue
 
-        # Check for read from memory: LD r,(var) or LD HL,(var)
-        read_match = re.match(r'LD\s+(A|HL|DE|BC),\(([^)]+)\)$', stripped)
+        # Check for read from memory: LD r,(var)
+        read_match = _READ_RE.match(canon)
         if read_match:
-            var = read_match.group(2)
-            if _is_indirect(var):
-                # `LD A,(HL)` may read any variable, including one with a
-                # store pending, so that store is not dead. This branch
-                # used to fall through and delete only "HL" from the map,
-                # which is a name no real variable has.
+            var = _operand_key(read_match.group(2))
+            if not var:
+                # A read through a register pair may read any variable,
+                # so no pending store is dead.
                 pending_stores = {}
-            elif var in pending_stores:
-                # This var is read - remove from pending (store was not dead)
-                del pending_stores[var]
+            else:
+                pending_stores.pop(var, None)
             result.append(line)
             i += 1
             continue
 
         # Any other instruction that might use memory indirectly
         # For safety, clear all pending stores on complex instructions
-        if (_BLOCK_OP_RE.search(stripped) or _INDIRECT_REF_RE.search(stripped)):
+        if _BLOCK_OP_RE.search(canon) or _INDIRECT_REF_RE.search(canon):
             pending_stores = {}
 
         result.append(line)
@@ -937,7 +991,6 @@ def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[lis
         print(f"  Dead store elimination: {total_savings} bytes saved")
 
     return result, total_savings
-
 
 def tail_merging_pass(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
     """

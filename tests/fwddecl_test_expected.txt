@@ -1,0 +1,3 @@
+Forward declaration test:
+10 + 25 = 35
+6 * 7 = 42

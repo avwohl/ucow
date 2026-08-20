@@ -13,6 +13,7 @@ LIB_DIR="$UCOW_DIR/lib"
 # cpmemu installs as a console script (`pip install cpmemu`), so take it
 # from PATH. $CPMEMU still overrides, for a build that is not installed.
 CPMEMU="${CPMEMU:-$(command -v cpmemu)}"
+CPMEMU_TIMEOUT="${CPMEMU_TIMEOUT:-20}"
 if [ -z "$CPMEMU" ]; then
     echo "cpmemu not found: install it, or set CPMEMU to the binary" >&2
     exit 1
@@ -24,7 +25,7 @@ GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
 # List of tests to run
-TESTS="hello arith loop record record2 typedef_test inherit_test interface_test union_test fwddecl_test asm_test nested_decl_test escape_test dead_store_test test_all"
+TESTS="hello simple arith loop record record2 typedef_test inherit_test interface_test union_test fwddecl_test asm_test asm_read_test include_test nested_decl_test escape_test dead_store_test test_all"
 
 PASSED=0
 FAILED=0
@@ -58,8 +59,15 @@ for test in $TESTS; do
 program = $TESTS_DIR/${test}.com
 EOF
 
-    # Run
-    output=$("$CPMEMU" "$TESTS_DIR/${test}.cfg" 2>&1)
+    # Run. The timeout matters: a miscompiled loop condition runs
+    # forever, and cpmemu has no limit of its own, so without it the
+    # suite hangs rather than failing.
+    output=$(timeout "$CPMEMU_TIMEOUT" "$CPMEMU" "$TESTS_DIR/${test}.cfg" 2>&1)
+    if [ $? -eq 124 ]; then
+        echo -e "${RED}FAIL${NC} (timed out after ${CPMEMU_TIMEOUT}s)"
+        ((FAILED++))
+        continue
+    fi
     if ! echo "$output" | grep -q "Program exit via JMP 0"; then
         echo -e "${RED}FAIL${NC} (runtime error)"
         echo "$output"
@@ -76,6 +84,15 @@ EOF
     expected="$TESTS_DIR/${test}_expected.txt"
     # test_all's baseline predates the naming convention.
     [ "$test" = "test_all" ] && expected="$TESTS_DIR/test_expected.txt"
+
+    if [ ! -f "$expected" ]; then
+        # Say so. A missing baseline silently downgrades a real check to
+        # a crash test, and a crash test passes a miscompile that still
+        # exits cleanly -- which is how the dead-store bug survived.
+        echo -e "${GREEN}PASS${NC} (no baseline: exit status only)"
+        ((PASSED++))
+        continue
+    fi
 
     if [ -f "$expected" ]; then
         # Drop cpmemu's own first two lines and its exit notice, and

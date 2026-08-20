@@ -1,0 +1,3 @@
+Inline assembly test:
+Value set via asm: 42
+Direct BDOS call: A

@@ -1,0 +1,2 @@
+Nested declaration test:
+tag=3 val=40 sum=43

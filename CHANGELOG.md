@@ -3,6 +3,100 @@
 Notable changes to ucow, a Cowgol compiler targeting 8080/Z80 CP/M.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.4.6
+
+0.4.5 fixed the dead-store pass for addresses held in a register pair.
+An adversarial review of that release found five more ways the same
+pass deletes a live store, all with the same cause: it matched raw,
+uppercase, `$`-anchored instruction text, and anything it failed to
+recognise it silently assumed was harmless. One of the five is
+reachable from ordinary source; the other four are hardening. All five
+predate 0.4.5 and are in every earlier release.
+
+The pass now matches against a canonical form of each line — comment
+stripped, whitespace runs collapsed — with case-insensitive patterns,
+and keys variables the way um80 resolves labels, which is
+case-insensitively. It also costs nothing: across the eighteen `.cow`
+programs under `tests/` it emits one instruction *fewer* than 0.4.5,
+because recognising `@asm` stores lets it retire a genuinely dead one
+it used to miss.
+
+### Fixed
+
+- **A variable read by inline assembly no longer looks like no read at
+  all.** `codegen` joins interpolated `@asm` parts with tabs, so
+  `@asm "ld a, (", v, ")"` reaches the optimizer as
+  `ld a, (<TAB>v_v<TAB>)`: lowercase, with whitespace inside the
+  operand. The read pattern was uppercase and `$`-anchored, so it did
+  not match, the store feeding the read was judged dead, and it was
+  deleted:
+
+  ```
+  v := 42;  @asm "ld a, (", v, ")";  ... print it ...
+  v := 65;  @asm "ld a, (", v, ")";  ... print it ...
+  ```
+
+  printed `A` where `--no-post-opt` printed `*A`. This is the one of
+  the five that ordinary source reaches, and `tests/asm_read_test.cow`
+  covers it.
+
+- **Lowercase `call` is a control-flow barrier.** The check was
+  `stripped.startswith('CALL')`. Not hypothetical: `tests/asm_test.cow`
+  emits `call 5` into this very stream.
+
+- **`RET NZ`, `RETI`, `RETN` and `RST` are barriers.** Only the exact
+  string `RET` was. With `RET NZ` between two stores to one variable the
+  first was deleted, but on the taken path control leaves before the
+  second runs, so the caller reads a stale value.
+
+- **`LD SP,(nn)`, `LD IX,(nn)` and `LD IY,(nn)` count as reads.** The
+  read pattern listed only A, HL, DE and BC. These forms exist on the
+  Z80 — `LD IX,(nn)` is DD 2A nn nn — and neither cleared the pending
+  store nor tripped the catch-all.
+
+- **An 8-bit store no longer kills a 16-bit one.** `LD (v),HL` writes
+  `v` and `v+1`; a following `LD (v),A` rewrites only `v`, yet the pass
+  deleted the 16-bit store and the high byte silently kept its old
+  value. Store width is now tracked, and a narrower store does not
+  retire a wider one.
+
+- **A label sharing its line with an instruction is a barrier**, and a
+  trailing comment no longer hides a read. Both followed from matching
+  raw text: `lbl:<TAB>NOP` did not end in a colon, and
+  `LD A,(v_x)<TAB>; read` did not end in a parenthesis.
+
+### Added
+
+- **Every test but one has a recorded output baseline.** 0.4.5 added
+  the comparison but only two tests had a file to compare against; the
+  other thirteen were still crash tests, and the skip was silent. There
+  are now seventeen baselines, taken from `--no-post-opt` output so they
+  record correct behaviour rather than current behaviour. `simple`
+  prints nothing, so it has none — an empty baseline passes vacuously —
+  and the runner now says `(no baseline: exit status only)` rather than
+  reporting a bare PASS.
+
+- **`simple` and `include_test` are in the suite.** Both were sitting in
+  `tests/` unrun. That is eighteen tests, all passing.
+
+- **A timeout around cpmemu**, 20 seconds by default and settable with
+  `$CPMEMU_TIMEOUT`. cpmemu has no limit of its own, so a miscompiled
+  loop condition hung the suite instead of failing it.
+
+### Verification
+
+Every `.cow` program under `tests/` was compiled with and without
+`--no-post-opt` and run under cpmemu: all eighteen agree, which is the
+property the optimizer is supposed to have and the one the dead-store
+bugs broke.
+
+Worth stating plainly: the existing programs did **not** catch these
+five. Restoring the 0.4.5 pass leaves all seventeen of them green — only
+the new `asm_read_test` goes red. The other four faults are not
+reachable from anything `codegen` emits today, and were found and fixed
+at the level of the pass itself, against hand-written instruction
+sequences, not by the suite.
+
 ## 0.4.5
 
 A silent miscompile in the post-assembly optimizer. Any program that

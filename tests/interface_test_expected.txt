@@ -1,0 +1,3 @@
+Interface test:
+Decimal: 538
+Hex: 0x0220

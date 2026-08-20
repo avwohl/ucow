@@ -1,0 +1,2 @@
+Via pointer: (5, 10)
+After set: (100, 200)

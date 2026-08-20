@@ -1,0 +1,4 @@
+Typedef test:
+b = 42
+w = 1234
+Hello typedef!
