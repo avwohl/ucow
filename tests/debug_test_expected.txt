@@ -1,0 +1,4 @@
+sum3=6
+total=7
+k=23
+twice=42

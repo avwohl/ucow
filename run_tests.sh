@@ -25,7 +25,7 @@ GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
 # List of tests to run
-TESTS="hello simple arith loop record record2 typedef_test inherit_test interface_test union_test fwddecl_test asm_test asm_read_test include_test nested_decl_test escape_test dead_store_test test_all"
+TESTS="hello simple arith loop record record2 typedef_test inherit_test interface_test union_test fwddecl_test asm_test asm_read_test include_test nested_decl_test escape_test dead_store_test debug_test test_all"
 
 PASSED=0
 FAILED=0
@@ -111,6 +111,22 @@ EOF
     echo -e "${GREEN}PASS${NC}"
     ((PASSED++))
 done
+
+# -g: the same .COM bytes with and without it, the markers, the coverage,
+# and a live udb80 session when cpmemu has --gdb and um80 has udb80.
+echo ""
+echo "Debug markers (-g)..."
+# A cpmemu with --gdb must run the live udb80 stage: a skip there is a failure.
+if "$CPMEMU" 2>&1 | grep -q -- '--gdb'; then
+    export UCOW_REQUIRE_UDB80=1
+else
+    echo "NOTE: this cpmemu has no --gdb; the live udb80 stage will be skipped"
+fi
+if CPMEMU="$CPMEMU" python3 "$TESTS_DIR/debug_info_check.py"; then
+    ((PASSED++))
+else
+    ((FAILED++))
+fi
 
 echo ""
 echo "Results: $PASSED passed, $FAILED failed"

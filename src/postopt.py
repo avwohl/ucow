@@ -16,6 +16,8 @@ Based on uplm80's postopt.py.
 import re
 from typing import Optional
 
+from .debugmarks import run_clean
+
 
 def get_instr_size(instr: str) -> Optional[int]:
     """Get the size of a Z80 instruction in bytes, or None if unknown."""
@@ -1028,6 +1030,9 @@ def dead_store_elimination(lines: list[str], verbose: bool = False) -> tuple[lis
 
     return result, total_savings
 
+_ROUTINE_START_RE = re.compile(r'^\s*;\s*(Subroutine\b|Main program\b)')
+
+
 def tail_merging_pass(lines: list[str], verbose: bool = False) -> tuple[list[str], int]:
     """
     Merge common instruction sequences at the end of multiple code paths.
@@ -1040,8 +1045,21 @@ def tail_merging_pass(lines: list[str], verbose: bool = False) -> tuple[list[str
     result = []
     total_savings = 0
 
+    # A tail is only merged with a tail of the same routine.  A jump into
+    # the middle of another routine puts the code of one routine under the
+    # name, the line and the frame record of another, which a debugger
+    # cannot undo.  The routine of a line is the number of "; Subroutine"
+    # and "; Main program" comments before it, which the code generator
+    # writes with or without -g.
+    routine_of = []
+    routine = 0
+    for line in lines:
+        if _ROUTINE_START_RE.match(line):
+            routine += 1
+        routine_of.append(routine)
+
     # First pass: find all subroutine end sequences (ending in RET)
-    # Map: sequence hash -> list of (start_line_idx, sequence_lines)
+    # Map: (routine, sequence) -> list of (start_line_idx, sequence_lines)
     ret_sequences = {}
 
     i = 0
@@ -1078,7 +1096,7 @@ def tail_merging_pass(lines: list[str], verbose: bool = False) -> tuple[list[str
 
             # Only consider sequences of 2+ instructions
             if len(seq) >= 2:
-                seq_key = tuple(seq)
+                seq_key = (routine_of[i], tuple(seq))
                 if seq_key not in ret_sequences:
                     ret_sequences[seq_key] = []
                 ret_sequences[seq_key].append((start_idx, i))  # start and end line indices
@@ -1094,7 +1112,7 @@ def tail_merging_pass(lines: list[str], verbose: bool = False) -> tuple[list[str
             continue
 
         # Calculate savings: (n-1) * (seq_bytes - 3) where 3 is JP instruction
-        seq_size = sum(get_instr_size(instr) or 2 for instr in seq_key)
+        seq_size = sum(get_instr_size(instr) or 2 for instr in seq_key[1])
         savings_per_merge = seq_size - 3  # JP is 3 bytes
 
         if savings_per_merge <= 0:
@@ -1185,45 +1203,48 @@ def optimize_asm(asm_code: str, verbose: bool = False) -> tuple[str, int]:
 
     total_savings = 0
 
+    # Each pass runs on the text without the ;# marker lines of -g, so the
+    # code is the same bytes with and without -g (debugmarks.run_clean).
+    def run(pass_fn, lines):
+        nonlocal total_savings
+
+        def one(clean):
+            nonlocal total_savings
+            out, savings = pass_fn(clean, verbose)
+            total_savings += savings
+            return out
+
+        return run_clean(lines, one, eol='\n')
+
     # Pass 1: Register tracking to eliminate redundant loads
-    lines, savings = register_tracking_pass(lines, verbose)
-    total_savings += savings
+    lines = run(register_tracking_pass, lines)
 
     # Pass 2: Eliminate jumps to next instruction
-    lines, savings = eliminate_jump_to_next(lines, verbose)
-    total_savings += savings
+    lines = run(eliminate_jump_to_next, lines)
 
     # Pass 3: Eliminate dead code after unconditional jumps
-    lines, savings = eliminate_dead_code(lines, verbose)
-    total_savings += savings
+    lines = run(eliminate_dead_code, lines)
 
     # Pass 4: Convert JP to JR where possible
-    lines, savings = convert_jp_to_jr(lines, verbose)
-    total_savings += savings
+    lines = run(convert_jp_to_jr, lines)
 
     # Pass 5: Tail merging (merge common code sequences)
-    lines, savings = tail_merging_pass(lines, verbose)
-    total_savings += savings
+    lines = run(tail_merging_pass, lines)
 
     # Pass 6: Dead store elimination
-    lines, savings = dead_store_elimination(lines, verbose)
-    total_savings += savings
+    lines = run(dead_store_elimination, lines)
 
     # Pass 7: Address folding (LD HL,addr / INC HL * n -> LD HL,addr+n)
-    lines, savings = address_folding_pass(lines, verbose)
-    total_savings += savings
+    lines = run(address_folding_pass, lines)
 
     # Pass 8: Combine print_i16 + print_nl into print_i16_nl
-    lines, savings = print_combining_pass(lines, verbose)
-    total_savings += savings
+    lines = run(print_combining_pass, lines)
 
     # Pass 9: Combine LD L,A / LD H,0 / CALL print_i16_nl into CALL print_a_nl
-    lines, savings = print_a_combining_pass(lines, verbose)
-    total_savings += savings
+    lines = run(print_a_combining_pass, lines)
 
     # Pass 10: Combine EX DE,HL / CALL print_i16_nl into CALL print_de_nl
-    lines, savings = print_de_combining_pass(lines, verbose)
-    total_savings += savings
+    lines = run(print_de_combining_pass, lines)
 
     return ''.join(lines), total_savings
 

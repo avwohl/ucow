@@ -357,6 +357,7 @@ def _translate_sub(sub: Any, filename: str) -> _ast.SubDecl:
         implements=implements,
         is_decl=is_decl,
         is_impl=is_impl,
+        end_line=getattr(getattr(sub, "pos", None), "end_line", None),
     )
 
 

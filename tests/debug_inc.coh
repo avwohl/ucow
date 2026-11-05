@@ -1,0 +1,5 @@
+# An include file for debug_test.cow: its lines belong to this file in -g.
+
+sub Twice(x: uint16): (y: uint16) is
+    y := x + x;  # @twice
+end sub;

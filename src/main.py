@@ -27,7 +27,7 @@ from . import ast
 def compile_file(input_path: str, output_path: str = None,
                  include_paths: list = None, optimize: bool = True,
                  opt_debug: bool = False, library_mode: bool = False,
-                 post_optimize: bool = True) -> bool:
+                 post_optimize: bool = True, debug_info: bool = False) -> bool:
     """Compile a Cowgol source file to 8080 assembly.
 
     Args:
@@ -63,7 +63,8 @@ def compile_file(input_path: str, output_path: str = None,
                 print(f"Optimizer: {changes} total changes")
 
         # Generate code
-        asm = generate(program, checker, library_mode=library_mode)
+        asm = generate(program, checker, library_mode=library_mode,
+                       debug_info=debug_info)
 
         # Post-assembly optimization (JP->JR, dead code elimination)
         if post_optimize:
@@ -98,7 +99,8 @@ def compile_file(input_path: str, output_path: str = None,
 
 def compile_multi_file(input_paths: List[str], output_path: str,
                        include_paths: list = None, optimize: bool = True,
-                       opt_debug: bool = False, graph_debug: bool = False) -> bool:
+                       opt_debug: bool = False, graph_debug: bool = False,
+                       debug_info: bool = False) -> bool:
     """Compile multiple Cowgol source files with whole-program workspace optimization.
 
     This mode parses all input files, builds a cross-module call graph, and
@@ -180,7 +182,8 @@ def compile_multi_file(input_paths: List[str], output_path: str,
         merged_checker = merge_checkers(checkers)
 
         # Generate with call graph info
-        asm = generate_with_callgraph(merged_program, merged_checker, call_graph, global_size)
+        asm = generate_with_callgraph(merged_program, merged_checker, call_graph,
+                                      global_size, debug_info=debug_info)
 
         # Write output
         output_path = Path(output_path)
@@ -303,9 +306,11 @@ def sum_all_locals(call_graph: CallGraph) -> int:
 
 
 def generate_with_callgraph(program: ast.Program, checker: TypeChecker,
-                            call_graph: CallGraph, global_size: int) -> str:
+                            call_graph: CallGraph, global_size: int,
+                            debug_info: bool = False) -> str:
     """Generate assembly using optimized workspace offsets from call graph."""
     gen = CodeGenerator(checker)
+    gen.debug_info = debug_info
     gen.call_graph = call_graph
     gen.global_data_offset = global_size
     return gen.gen_program(program)
@@ -367,6 +372,14 @@ def main():
         help="Enable workspace optimization (automatic with multiple files)"
     )
     parser.add_argument(
+        '-g', '--debug-info',
+        action='store_true',
+        help="Write ;# debug markers (source lines, routines) into the .mac "
+             "file. The code is the same bytes. Assemble with um80 "
+             "--debug-info and link with ul80 --debug-info to get prog.dbg "
+             "(docs/debug_info_g.md)"
+    )
+    parser.add_argument(
         '--no-post-opt',
         action='store_true',
         help="Disable post-assembly optimization (JP->JR conversion, dead code elimination)"
@@ -414,7 +427,8 @@ def main():
             input_files, args.output, args.include,
             optimize=not args.no_optimize,
             opt_debug=args.opt_debug,
-            graph_debug=args.graph_debug
+            graph_debug=args.graph_debug,
+            debug_info=args.debug_info
         )
     else:
         # Single file compilation (original mode)
@@ -423,7 +437,8 @@ def main():
             optimize=not args.no_optimize,
             opt_debug=args.opt_debug,
             library_mode=args.library,
-            post_optimize=not args.no_post_opt
+            post_optimize=not args.no_post_opt,
+            debug_info=args.debug_info
         )
     return 0 if success else 1
 

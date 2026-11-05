@@ -17,7 +17,9 @@ See docs/z80_8080_reference.md for full details.
 
 from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass, field
+import os
 from . import ast
+from . import debugmarks
 from .types import (
     TypeChecker, CowType, IntType, PtrType, ArrayType, RecordType,
     InterfaceType, INT8, UINT8, INT16, UINT16, INT32, UINT32, INTPTR,
@@ -88,6 +90,10 @@ class CodeGenerator:
         self.global_data_offset = 0  # Size of global variables
         # Track per-subroutine local offsets when using workspace optimization
         self.sub_local_offsets: Dict[str, int] = {}  # sub_name -> current offset within workspace
+        # Debug markers (-g): whole-line ;# comments, see debugmarks.py
+        self.debug_info: bool = False
+        self._dbg_files: Dict[str, int] = {}   # path -> file number (1 and up)
+        self._dbg_last: Optional[Tuple[int, int, bool]] = None  # last ;#line written
 
     def invalidate_regs(self) -> None:
         """Invalidate register tracking (after calls, jumps, etc)."""
@@ -296,6 +302,63 @@ class CodeGenerator:
         # Invalidate register tracking at labels - we might jump here from elsewhere
         self.hl_contains = None
         self.a_contains = None
+
+    # === Debug markers (-g) ===
+    #
+    # A marker is a comment line, so it writes no byte.  It goes straight into
+    # self.output and not through emit(), which reads the text of each line it
+    # is given.  Nothing here reads the state that decides which code to write.
+
+    def dbg_file_no(self, filename: str) -> int:
+        """The number of a source file in the ;#file table."""
+        path = filename
+        try:
+            rel = os.path.relpath(filename)
+            if not rel.startswith('..'):
+                path = rel
+        except ValueError:
+            pass   # another drive on Windows
+        no = self._dbg_files.get(path)
+        if no is None:
+            no = len(self._dbg_files) + 1
+            self._dbg_files[path] = no
+        return no
+
+    def dbg_line(self, loc, nostmt: bool = False) -> None:
+        """;#line for the position loc (a SourceLocation), unless it is the
+        position that the last marker already gave."""
+        if not self.debug_info or loc is None:
+            return
+        key = (self.dbg_file_no(loc.filename), loc.line, nostmt)
+        if key == self._dbg_last:
+            return
+        self._dbg_last = key
+        self.output.append(f";#line {key[0]} {key[1]}" + (" nostmt" if nostmt else ""))
+
+    def dbg_func(self, name: str, loc) -> None:
+        """;#func at the start of a routine.  Locals are at fixed addresses
+        (frame=static).  The caller removes the stack arguments (a POP or
+        an ADD HL,SP after the CALL), so the routine pops nothing."""
+        if not self.debug_info:
+            return
+        self.output.append(
+            f";#func {name} {self.dbg_file_no(loc.filename)} {loc.line} "
+            f"frame=static pops=0")
+        self._dbg_last = None
+
+    def dbg_endfunc(self, name: str) -> None:
+        if not self.debug_info:
+            return
+        self.output.append(f";#endfunc {name}")
+        self._dbg_last = None
+
+    def dbg_file_table(self) -> List[str]:
+        """The ;#file lines, one for each file that a marker names."""
+        lines = []
+        for path, no in self._dbg_files.items():
+            quoted = path.replace('\\', '\\\\').replace('"', '\\"')
+            lines.append(f';#file {no} "{quoted}"')
+        return lines
 
     def emit_data(self, line: str) -> None:
         """Emit a data line."""
@@ -1083,11 +1146,22 @@ class CodeGenerator:
                 candidate = self.inline_candidates.get(name)
                 if candidate and candidate.decl.body:
                     self.emit(f"\t; Inlined: {name}")
+                    saved_last = self._dbg_last
+                    if self.debug_info:
+                        # The call site is the position of the last ;#line.
+                        # ;#endinline goes back to that position.
+                        self.output.append(
+                            f";#inline {self.dbg_file_no(expr.location.filename)} "
+                            f"{expr.location.line} {name}")
+                        self._dbg_last = None
                     self.generating_inline = True
                     for stmt in candidate.decl.body:
                         if not isinstance(stmt, ast.ReturnStmt):
                             self.gen_stmt(stmt)
                     self.generating_inline = False
+                    if self.debug_info:
+                        self.output.append(";#endinline")
+                        self._dbg_last = saved_last
                     return
 
         # Determine calling convention:
@@ -1179,6 +1253,14 @@ class CodeGenerator:
 
     def gen_stmt(self, stmt: ast.Statement) -> None:
         """Generate code for a statement."""
+
+        # One ;#line for each statement that can write code.  A statement
+        # that writes none leaves its marker next to the next one, which
+        # the assembler merges (debug_info.md, "The merge rule").
+        if self.debug_info and not isinstance(
+                stmt, (ast.ConstDecl, ast.RecordDecl, ast.TypedefDecl,
+                       ast.InterfaceDecl, ast.NestedSubStmt, ast.SubDecl)):
+            self.dbg_line(stmt.location)
 
         if isinstance(stmt, ast.VarDecl):
             self.gen_var_decl(stmt)
@@ -1642,6 +1724,7 @@ class CodeGenerator:
             else_label = next_label
 
             # Use optimized condition branching
+            self.dbg_line(cond.location)
             self.gen_condition_branch(cond, next_label)
 
             for s in body:
@@ -1706,6 +1789,7 @@ class CodeGenerator:
             next_when = self.new_label("WHEN")
 
             for val in values:
+                self.dbg_line(val.location)
                 self.emit("\tPOP\tHL")
                 self.emit("\tPUSH\tHL")
                 self.gen_expr(val, 'HL')
@@ -1730,6 +1814,7 @@ class CodeGenerator:
             self.emit_label(next_when)
 
         # Else clause
+        self.dbg_line(stmt.location)
         self.emit("\tPOP\tHL")  # Clean stack
         if stmt.else_body:
             for s in stmt.else_body:
@@ -1807,6 +1892,9 @@ class CodeGenerator:
                 self.emit_label(mangled_name)
         else:
             self.emit_label(mangled_name)
+        self.dbg_func(mangled_name, decl.location)
+        # The prologue (copy the parameters) has the line of the declaration.
+        self.dbg_line(decl.location)
 
         # Allocate local variables for parameters and return values
         # These are locals, so they can share space with non-concurrent subs
@@ -1893,6 +1981,11 @@ class CodeGenerator:
         for stmt in decl.body:
             self.gen_stmt(stmt)
 
+        # The epilogue has the line of "end sub".
+        if decl.end_line:
+            self.dbg_line(ast.SourceLocation(decl.location.filename,
+                                             decl.end_line, 1))
+
         # Return (with first return value in HL)
         if returns:
             ret_var = returns[0][0]  # (name, type) tuple
@@ -1906,6 +1999,7 @@ class CodeGenerator:
                 self.emit(f"\tLD\tHL,({mangled_ret})")
 
         self.emit("\tRET")
+        self.dbg_endfunc(mangled_name)
 
         # Generate any nested subs collected during body generation
         if hasattr(self, 'nested_subs') and self.nested_subs:
@@ -1968,12 +2062,18 @@ class CodeGenerator:
             self.emit("")
             self.emit("; Main program")
             self.emit_label("_main")
+            if self.debug_info:
+                first = program.statements[0].location if program.statements \
+                    else program.location
+                self.dbg_func("_main", first)
+                self.dbg_line(first)
 
             for stmt in program.statements:
                 self.gen_stmt(stmt)
 
             # Exit
             self.emit("\tJP\t0")  # Warm boot
+            self.dbg_endfunc("_main")
             self.emit("")
 
         # String literals (stay in CSEG - they're read-only)
@@ -2048,12 +2148,18 @@ class CodeGenerator:
         self.emit("")
         self.emit("\tEND")
 
-        # Apply peephole optimizations iteratively until no more changes
+        # The file table goes after ".Z80" and its blank line.
+        if self.debug_info:
+            self.output[4:4] = self.dbg_file_table()
+
+        # Apply peephole optimizations iteratively until no more changes.
+        # With -g the pass sees the text without the ;# marker lines, so the
+        # code is the same bytes as without -g (debugmarks.run_clean).
         prev_len = len(self.output) + 1
         passes = 0
         while len(self.output) < prev_len and passes < 10:
             prev_len = len(self.output)
-            self.output = self.peephole_optimize(self.output)
+            self.output = debugmarks.run_clean(self.output, self.peephole_optimize)
             passes += 1
 
         return '\n'.join(self.output)
@@ -2891,14 +2997,17 @@ class CodeGenerator:
         return result
 
 
-def generate(program: ast.Program, checker: TypeChecker, library_mode: bool = False) -> str:
+def generate(program: ast.Program, checker: TypeChecker, library_mode: bool = False,
+             debug_info: bool = False) -> str:
     """Generate assembly from AST.
 
     Args:
         program: The AST to generate code from
         checker: The type checker with symbol information
         library_mode: If True, generate a library module without main entry point
+        debug_info: If True, write ;# debug marker comments (-g)
     """
     gen = CodeGenerator(checker)
     gen.library_mode = library_mode
+    gen.debug_info = debug_info
     return gen.gen_program(program)

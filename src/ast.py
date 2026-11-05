@@ -441,6 +441,7 @@ class SubDecl(Declaration):
     implements: Optional[str] = None  # Interface name
     is_decl: bool = False  # @decl forward declaration
     is_impl: bool = False  # @impl implementation
+    end_line: Optional[int] = None  # Line of "end sub" (for -g)
 
 
 @dataclass

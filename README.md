@@ -56,6 +56,7 @@ python3 -m src.main -I ./lib -I ./include source.cow -o output.mac
 | `-I PATH` | Add include search path |
 | `-O0` | Disable optimization |
 | `--no-post-opt` | Disable post-assembly optimization |
+| `-g`, `--debug-info` | Write debug markers for udb80. The `.com` stays the same. See [docs/debug_info_g.md](docs/debug_info_g.md) |
 | `--graph-debug` | Show call graph analysis |
 | `--tokens` | Dump tokens and exit |
 | `--ast` | Dump AST and exit |

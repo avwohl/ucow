@@ -3,6 +3,64 @@
 Notable changes to ucow, a Cowgol compiler targeting 8080/Z80 CP/M.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+Phase 4 of the debugger plan in cpmemu (`docs/debugger_plan.md`): `ucow -g`
+writes the `;#` markers that `um80 --debug-info` and `ul80 --debug-info` turn
+into `prog.dbg`, which `udb80` reads. The rule of the plan (D2) is that `-g`
+never changes the code, and this release holds it.
+
+### Added
+
+- **`ucow -g` (`--debug-info`).** `;#file`, `;#line` for each statement
+  (and for each `elseif` condition and each `when` value), `;#func` and
+  `;#endfunc` for each subroutine and for `_main` (`frame=static pops=0`),
+  and `;#inline` and `;#endinline` around each call that the inliner
+  expands. `end sub` has a line too: `SubDecl.end_line` comes from the end
+  position of the uplox node. Details are in `docs/debug_info_g.md`.
+
+- **`src/debugmarks.py`.** `run_clean` takes the marker lines out of the text
+  before a pass and puts each one back in front of the line it was in front of
+  (or in front of the text that replaced the line). `peephole_optimize` and
+  all ten passes of `postopt.optimize_asm` run through it, so each pass sees
+  exactly the text of a build without `-g`. A `;#noopt begin` to `;#noopt end`
+  region is kept out of the passes and comes back unchanged (ucow writes no
+  such region yet).
+
+- **`tests/debug_info_check.py`, run by `run_tests.sh`, and `tests/debug_test.cow`.**
+  Measured: 22 programs times four option sets (88 builds) give the same
+  `.com` with and without `-g`, and the same `.mac` text once the marker
+  lines are removed. In the 22 programs 5713 of 5713 routine bytes have a
+  source line in `prog.dbg`. A live `udb80` session (`break` on a line of
+  `Sum3`, `bt`, `step`, `next`) runs when `cpmemu` has `--gdb`. With
+  `run_clean` turned off the `.com` of `test_all` has 4992 bytes and not
+  4608, so the test can fail. `run_tests.sh`: 17 passed and 1 failed before
+  (`escape_test`, which already failed), 19 passed and 1 failed after.
+
+### Changed
+
+- **`tail_merging_pass` no longer merges a tail into another routine.** The
+  pass used to replace the tail of one routine by a `JP` into the middle of the
+  next routine that ended the same way, which puts code under the wrong
+  routine for a debugger. It now merges inside one routine only, with and
+  without `-g` (a rule that depended on `-g` would break D2). The routine of a
+  line is counted from the `; Subroutine` and `; Main program` comments. The
+  pass merged no tail in any of the 22 test programs, so the `.com` files
+  are unchanged under all four option sets (measured against the previous
+  commit). The size cost on a large program is not measured: no large Cowgol
+  program was available. A unit test in `debug_info_check.py` shows that two
+  routines that end the same way are no longer merged.
+
+### Not done
+
+- `-L` with the post optimizer still deletes the data of a library module
+  (`examples/multifile/b.cow`: `Undefined symbol 'v_x_i'`). It does so with
+  and without `-g`, so `debug_info_check.py` builds libraries with
+  `--no-post-opt`.
+- No `ixbegin`/`ixend` (ucow has no IX frame), no variables in `prog.dbg`
+  (phase 8: workspace sharing puts two locals at one address), no `--optnone`
+  (phase 5).
+
 ## 0.4.6
 
 0.4.5 fixed the dead-store pass for addresses held in a register pair.

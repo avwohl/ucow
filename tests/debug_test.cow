@@ -1,0 +1,67 @@
+# Source for the debug markers of ucow -g: a call that the inliner
+# expands, a case, an elseif, loops, a sub with three arguments (they go
+# on the stack), a sub with a return value, and a sub from an include
+# file. tests/debug_info_check.py builds this file with and without -g
+# and looks at the markers.
+
+include "debug_inc.coh";
+
+var total: uint16 := 0;
+
+# Small, no arguments, no locals: the inliner expands every call.
+sub Bump() is
+    total := total + 1;  # @bump
+end sub;
+
+sub Sum3(a: uint16, b: uint16, c: uint16): (r: uint16) is
+    r := a + b;
+    r := r + c;  # @sum3
+end sub;
+
+sub Classify(n: uint8): (k: uint8) is
+    if n == 0 then
+        k := 10;  # @then
+    elseif n == 1 then
+        k := 20;  # @elif
+    else
+        k := 30;  # @else
+    end if;
+    case n is
+        when 5:
+            k := k + 1;
+        when 6:
+            k := k + 2;  # @when6
+        when else:
+            k := k + 3;
+    end case;
+end sub;
+
+sub Count() is
+    var i: uint8 := 0;
+    while i < 3 loop
+        Bump();  # @call1
+        i := i + 1;  # @incr
+    end loop;
+    loop
+        Bump();
+        if total > 6 then
+            break;
+        end if;
+    end loop;
+end sub;
+
+Count();
+var s: uint16 := Sum3(1, 2, 3);  # @main
+print("sum3=");
+print_i16(s);
+print("\r\n");
+print("total=");
+print_i16(total);
+print("\r\n");
+var k: uint8 := Classify(1);
+print("k=");
+print_i8(k);
+print("\r\n");
+print("twice=");
+print_i16(Twice(21));
+print("\r\n");
