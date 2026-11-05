@@ -25,7 +25,7 @@ GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
 # List of tests to run
-TESTS="hello simple arith loop record record2 typedef_test inherit_test interface_test union_test fwddecl_test asm_test asm_read_test include_test nested_decl_test escape_test dead_store_test debug_test test_all"
+TESTS="hello simple arith loop record record2 typedef_test inherit_test interface_test union_test fwddecl_test asm_test asm_read_test include_test nested_decl_test escape_test dead_store_test debug_test vars_test test_all"
 
 PASSED=0
 FAILED=0

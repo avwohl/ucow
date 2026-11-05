@@ -1,0 +1,13 @@
+# Main program of the workspace test with variable records.
+
+include "lib.coh";
+
+var counter: uint16 := 0;
+
+process_a(10);
+counter := counter + 1;
+process_b(20);
+counter := counter + 1;  # @main
+print("counter=");
+print_i16(counter);
+print("\r\n");

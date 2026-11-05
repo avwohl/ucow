@@ -44,7 +44,7 @@ python3 ucow main.cow \
 ./run_tests.sh
 
 # run_tests.sh also runs tests/debug_info_check.py: the same .COM with and
-# without -g (88 builds), the markers, and a live udb80 session when available.
+# without -g (96 builds), the markers, and a live udb80 session when available.
 
 # Or one test by hand. -I ../lib is what resolves the generated
 # INCLUDE 'runtime.mac'; without it the assemble step fails.
@@ -72,6 +72,7 @@ parser's AST and this one's.
 - `src/codegen.py` - 8080 assembly code generator
 - `src/postopt.py` - Peephole pass over the generated `.mac`
 - `src/debugmarks.py` - `-g`: takes the `;#` marker lines out of the text before a text pass and puts them back after it, so the code is the same bytes with and without `-g` (docs/debug_info_g.md). A new text pass must run through `run_clean`
+- `src/varinfo.py` - `-g`: the `;#type` and `;#var` records (phase 8). Written after the last text pass, with `CodeGenerator.add_var_markers`, never before: a marker or label inside a pass can change the code (D2, docs/debug_info_g.md)
 - `src/main.py` - Driver
 - `src/__init__.py` - `__version__`, which `[tool.hatch.version]` reads
 - `lib/runtime.mac` - Runtime support routines

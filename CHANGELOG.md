@@ -37,6 +37,40 @@ never changes the code, and this release holds it.
   4608, so the test can fail. `run_tests.sh`: 17 passed and 1 failed before
   (`escape_test`, which already failed), 19 passed and 1 failed after.
 
+- **Variable records (phase 8 of the plan).** `ucow -g` writes a `;#var`
+  marker for each global, parameter, local and named return value, and a
+  `;#type` marker for each record and typedef that a variable uses. The
+  markers go in after the last text pass (`src/varinfo.py`, called from
+  `main.py` after `postopt`), so the code is the same bytes. Locals and
+  parameters stand after their `;#func` marker, so a record belongs to one
+  subroutine: in workspace mode (`at=_wsbase+N`) two subroutines can share an
+  address and `udb80` picks the name of the subroutine in the frame. A
+  parameter has a `range=` that starts after the copy in the prologue (the
+  labels `??VSn` and `??VEn`). A local whose store the optimizer removed, and
+  a global whose data `postopt` removed, are `none why=no-storage`. Types:
+  `int8` and `uint8` are `schar:1` and `uchar:1`, 16-bit and 32-bit types are
+  `int`/`uint` and `long`/`ulong`, `[T]` is `*T`, records are `struct` (or
+  `union` when members overlap) with members and offsets, typedefs keep their
+  name. Details are in `docs/debug_info_g.md`.
+
+- **`tests/vars_test.cow`, `tests/vars_ws/` and the variable checks of
+  `tests/debug_info_check.py`.** A live `udb80` session against
+  `cpmemu --gdb` prints every storage kind at a known value (globals of
+  each size, a typedef, a pointer, an array, a nested record, a union, a
+  string pointer, a stack-passed parameter, locals, and a caller's variables
+  with `frame 1`), and the workspace pair prints the locals of two
+  subroutines that share one address. An interface variable has the type
+  `*func(void)`, so `print` shows the target subroutine. Measured: 191 records
+  in 24 programs (67 global, 88 local, 36 parameter); 178 at an address, 13 `none
+  why=no-storage`, none in a register; 6 addresses shared by two
+  subroutines. D2: 96 builds (was 88) give the same `.com` with and without
+  `-g`. `debug_info_check.py`: 600 passed with `CPMEMU` set (561 without, when
+  the live `udb80` sessions skip; was 317), 0 failed.
+  `run_tests.sh`: 20 passed, 1 failed (was 19 and 1; the failure is
+  `escape_test`, which already failed). With `add_markers` called before
+  the peephole pass, 28 of the 96 builds give a different `.com`, so the
+  test can fail.
+
 ### Changed
 
 - **`tail_merging_pass` no longer merges a tail into another routine.** The
@@ -57,9 +91,17 @@ never changes the code, and this release holds it.
   (`examples/multifile/b.cow`: `Undefined symbol 'v_x_i'`). It does so with
   and without `-g`, so `debug_info_check.py` builds libraries with
   `--no-post-opt`.
-- No `ixbegin`/`ixend` (ucow has no IX frame), no variables in `prog.dbg`
-  (phase 8: workspace sharing puts two locals at one address), no `--optnone`
-  (phase 5).
+- No `ixbegin`/`ixend` (ucow has no IX frame), no `--optnone` (phase 5).
+- A parameter of a typedef type has the base type in its record: the type
+  checker keeps no typedef name for a parameter. A variable that the source
+  declares keeps the name.
+- ucow stores 16 bits of an `int32` or `uint32`, so `udb80` shows the upper
+  half as zero: a value over 65535 shows wrong, and `-5` in an `int32` prints
+  as 65531 (measured). The record has the right type. Not changed here.
+- A nested subroutine cannot print a variable of the subroutine around
+  the nested subroutine (a record belongs to one routine; `No symbol`).
+- `scope=` runs to `end sub`: the AST has no end line for an inner block, so
+  a loop-body variable stays visible after the loop.
 
 ## 0.4.6
 

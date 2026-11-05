@@ -1,0 +1,87 @@
+# Source for the variable records of ucow -g (docs/debug_info_g.md).
+# tests/debug_info_check.py builds this file with -g and prints each
+# variable with udb80 at a known value. A tag "@name" in a comment marks the
+# line where the check stops.
+
+typedef byte is uint8;
+typedef counter is uint16;
+
+record Point is
+    x: int16;
+    y: int16;
+end record;
+
+record Box is
+    lo: Point;
+    hi: Point;
+    tag: byte;
+    next: [Box];
+end record;
+
+record Value is
+    as_word @(0): uint16;
+    as_byte @(0): uint8;
+end record;
+
+var g8: int8 := -5;
+var gu8: uint8 := 200;
+var g16: int16 := -1234;
+var gu16: uint16 := 54321;
+var g32: int32 := 30000;
+var gu32: uint32 := 60000;
+var gb: byte := 7;
+var gc: counter := 4242;
+var gnums: uint16[4];
+var gbox: Box;
+var gval: Value;
+var gtext: [uint8] := "hello";
+var gptr: [Point];
+var ginit: uint8[] := {10, 20, 30, 40, 50};
+var gneg32: int32 := -5;  # known limitation: ucow stores 16 bits of an int32
+
+interface Cb(v: uint16);
+sub CbTarget(v: uint16) implements Cb is
+    gu8 := v as uint8;
+end sub;
+var gcb: Cb := CbTarget;
+
+# Three arguments: they come on the stack and are copied to static slots.
+sub Inner(a: uint8, b: uint16, c: uint16): (r: uint16) is
+    var loc8: int8 := -3;
+    var loc16: uint16 := 1000;
+    var larr: uint8[3];
+    var lpt: Point;
+    larr[0] := 1;
+    larr[1] := 2;
+    larr[2] := 3;
+    lpt.x := 11;
+    lpt.y := 22;
+    r := b + loc16 + c + a as uint16 + loc8 as uint16;  # @inner
+end sub;
+
+sub Outer(n: uint16): (m: uint16) is
+    var oloc: uint16 := n + 100;
+    var obox: Box;
+    obox.lo.x := 5;
+    obox.hi.y := 6;
+    obox.tag := 9;
+    m := Inner(3, oloc, 7);  # @outer
+    m := m + 1;
+end sub;
+
+gnums[0] := 10;
+gnums[1] := 20;
+gnums[2] := 30;
+gnums[3] := 40;
+gbox.lo.x := 1;
+gbox.lo.y := 2;
+gbox.hi.x := 3;
+gbox.hi.y := 4;
+gbox.tag := 5;
+gbox.next := &gbox;
+gval.as_word := 0x1234;
+gptr := &gbox.hi;
+var res: uint16 := Outer(5);  # @main
+print("res=");
+print_i16(res);
+print("\r\n");

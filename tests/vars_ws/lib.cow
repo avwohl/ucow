@@ -1,0 +1,30 @@
+# Two subroutines that are never active together. Workspace mode (two
+# source files) puts their locals at the same addresses; the records name
+# the routine, so a debugger picks the right name. Used by
+# tests/debug_info_check.py.
+
+include "lib.coh";
+
+sub process_a(n: uint16) is
+    var a1: uint16;
+    var a2: uint16;
+    var abuf: uint8[4];
+
+    a1 := n;
+    a2 := n * 2;
+    abuf[0] := 1;
+    abuf[3] := 4;
+    abuf[2] := (a1 + a2) as uint8;  # @a
+end sub;
+
+sub process_b(n: uint16) is
+    var b1: uint16;
+    var b2: uint16;
+    var bbuf: uint8[4];
+
+    b1 := n + 5;
+    b2 := 7;
+    bbuf[1] := 22;
+    bbuf[2] := 33;
+    bbuf[3] := (b1 + b2) as uint8;  # @b
+end sub;

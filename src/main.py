@@ -63,14 +63,17 @@ def compile_file(input_path: str, output_path: str = None,
                 print(f"Optimizer: {changes} total changes")
 
         # Generate code
-        asm = generate(program, checker, library_mode=library_mode,
-                       debug_info=debug_info)
+        asm, gen = generate(program, checker, library_mode=library_mode,
+                            debug_info=debug_info, return_generator=True)
 
         # Post-assembly optimization (JP->JR, dead code elimination)
         if post_optimize:
             asm, savings = optimize_asm(asm, verbose=opt_debug)
             if opt_debug and savings > 0:
                 print(f"Post-optimizer: {savings} bytes saved")
+
+        # -g: the variable markers go in after the last text pass
+        asm = gen.add_var_markers(asm)
 
         # Write output
         output_path.write_text(asm)
@@ -313,7 +316,7 @@ def generate_with_callgraph(program: ast.Program, checker: TypeChecker,
     gen.debug_info = debug_info
     gen.call_graph = call_graph
     gen.global_data_offset = global_size
-    return gen.gen_program(program)
+    return gen.add_var_markers(gen.gen_program(program))
 
 
 def main():

@@ -27,7 +27,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 # The kinds of docs/debug_info.md.  A comment such as ``; #pragma ...`` has
 # another word after the ``#`` and is a plain comment.
 _MARKER = re.compile(
-    r"^[ \t]*;[ \t]*#(file|line|inline|endinline|func|endfunc|noopt)"
+    r"^[ \t]*;[ \t]*#(file|line|inline|endinline|func|endfunc|noopt|var|type)"
     r"(?![A-Za-z0-9_])", re.IGNORECASE)
 _NOOPT_BEGIN = re.compile(r"^[ \t]*;[ \t]*#noopt[ \t]+begin\b", re.IGNORECASE)
 _NOOPT_END = re.compile(r"^[ \t]*;[ \t]*#noopt[ \t]+end\b", re.IGNORECASE)

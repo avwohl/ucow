@@ -13,6 +13,9 @@ run_tests.sh runs this file.  Exit status 0 if every check passed, else 1.
    rule that a tail is not merged into another routine.
 5. A live udb80 session against cpmemu --gdb (needs both; UCOW_REQUIRE_UDB80=1
    makes a missing one a failure instead of a skip).
+6. Variables (phase 8): the ;#var and ;#type records of tests/vars_test.cow
+   and tests/vars_ws/ in prog.dbg, the statistics over the whole suite, and a
+   live udb80 session that prints each kind of variable at a known value.
 """
 
 import concurrent.futures
@@ -82,13 +85,18 @@ def sha(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-MARKER = re.compile(r'^[ \t]*;[ \t]*#(file|line|inline|endinline|func|endfunc|noopt)\b',
-                    re.I)
+MARKER = re.compile(
+    r'^[ \t]*;[ \t]*#(file|line|inline|endinline|func|endfunc|noopt|var|type)\b',
+    re.I)
+# -g also writes the labels ??VSn and ??VEn (the range of a parameter): a
+# label writes no byte, and the .com is compared, but the .mac text is not.
+VAR_LABEL = re.compile(r'^\?\?V[SE]\d+:$')
 
 
 def without_markers(path):
     with open(path) as f:
-        return [ln for ln in f.read().split('\n') if not MARKER.match(ln)]
+        return [ln for ln in f.read().split('\n')
+                if not MARKER.match(ln) and not VAR_LABEL.match(ln)]
 
 
 def programs(work):
@@ -113,6 +121,11 @@ def programs(work):
     shutil.copy(os.path.join(ws, 'lib.cow'), os.path.join(work, 'ws_lib.cow'))
     shutil.copy(os.path.join(ws, 'lib.coh'), work)
     out.append(('ws', ['ws_main.cow', 'ws_lib.cow'], False))
+    vw = os.path.join(TESTS, 'vars_ws')
+    shutil.copy(os.path.join(vw, 'main.cow'), os.path.join(work, 'vw_main.cow'))
+    shutil.copy(os.path.join(vw, 'lib.cow'), os.path.join(work, 'vw_lib.cow'))
+    shutil.copy(os.path.join(vw, 'lib.coh'), os.path.join(work, 'lib.coh'))
+    out.append(('vw', ['vw_main.cow', 'vw_lib.cow'], False))
     return out
 
 
@@ -231,6 +244,80 @@ def markers_and_coverage(work, progs):
     print(f"coverage: {have} of {total} bytes of routines have a source line")
 
 
+def vrows(dbg):
+    """The vars table as dicts."""
+    out = []
+    for r in dbg.get('vars') or []:
+        r = list(r) + [None] * (10 - len(r))
+        out.append({'name': r[0], 'type': r[1], 'kind': r[2], 'loc': r[3],
+                    'func': r[4], 'scope': r[5], 'ranges': r[6], 'decl': r[7],
+                    'why': r[9]})
+    return out
+
+
+def variables(work, progs):
+    """6. The records in prog.dbg, and the statistics over the suite."""
+    shutil.copy(os.path.join(TESTS, 'vars_test.cow'), work)
+    dbg = dbg_of(work, ['vars_test.cow'], 'vt')
+    if dbg:
+        v = {(r['func'] is not None, r['name']): r for r in vrows(dbg)}
+        want = {'g8': 'schar:1', 'gu8': 'uchar:1', 'g16': 'int:2', 'gu16': 'uint:2',
+                'g32': 'long:4', 'gu32': 'ulong:4', 'gb': 'typedef:byte',
+                'gc': 'typedef:counter', 'gnums': '[4]uint:2', 'gbox': 'struct:Box',
+                'gval': 'union:Value', 'gtext': '*uchar:1', 'gptr': '*struct:Point',
+                'ginit': '[5]uchar:1', 'res': 'uint:2'}
+        for name, typ in want.items():
+            r = v.get((False, name))
+            check(r is not None and r['type'] == typ and r['kind'] == 'global'
+                  and r['loc'] and r['loc'][0] == 'at',
+                  f"vars: global {name} has type {typ} at an address, has {r}")
+        check(set(dbg['types']) == {'typedef:byte', 'typedef:counter', 'struct:Point',
+                                    'struct:Box', 'union:Value'},
+              f"vars: the types are {sorted(dbg['types'])}")
+        for name, kind in (('a', 'param'), ('b', 'param'), ('c', 'param'),
+                           ('r', 'local'), ('loc8', 'local'), ('larr', 'local'),
+                           ('lpt', 'local'), ('n', 'param'), ('oloc', 'local'),
+                           ('obox', 'local')):
+            r = v.get((True, name))
+            check(r is not None and r['kind'] == kind and r['loc'],
+                  f"vars: {kind} {name} is at an address, has {r}")
+        # A parameter is valid after the copy only: it has a range.
+        check(all(r['ranges'] for r in vrows(dbg) if r['kind'] == 'param' and r['loc']),
+              "vars: each parameter has a range (valid after the copy)")
+    # workspace mode: two routines at one address, each record names its routine
+    vw = ['vw_main.cow', 'vw_lib.cow']
+    dbg = dbg_of(work, vw, 'vw')
+    if dbg:
+        rows = vrows(dbg)
+        funcs = {fn['name']: fn['start'] for fn in dbg['funcs']}
+        by = {(r['func'], r['name']): r for r in rows}
+        abuf = by.get((funcs['process_a'], 'abuf'))
+        bbuf = by.get((funcs['process_b'], 'bbuf'))
+        check(abuf and bbuf and abuf['loc'] == bbuf['loc'] and abuf['loc'],
+              f"vars ws: abuf and bbuf share an address, have {abuf} {bbuf}")
+        check(abuf and bbuf and abuf['func'] != bbuf['func'],
+              "vars ws: the two records name two routines")
+        a1 = by.get((funcs['process_a'], 'a1'))
+        check(a1 and a1['why'] == 'no-storage' and a1['loc'] is None,
+              "vars ws: a1 has no place and says why (the optimizer removed the store)")
+    # statistics over the suite
+    kinds, places, nprog, nrec = {}, {}, 0, 0
+    for name, srcs, _ in progs:
+        d = dbg_of(work, srcs, 'vs_' + name)
+        if not d:
+            continue
+        nprog += 1
+        for r in vrows(d):
+            nrec += 1
+            kinds[r['kind']] = kinds.get(r['kind'], 0) + 1
+            p = 'none' if not r['loc'] else r['loc'][0]
+            places[p] = places.get(p, 0) + 1
+            check(r['loc'] is not None or r['why'],
+                  f"vars {name}: {r['name']} has no place and no reason")
+    print(f"vars: {nrec} records in {nprog} programs; kinds {sorted(kinds.items())}; "
+          f"places {sorted(places.items())}")
+
+
 def unit():
     """4. run_clean and the passes."""
     # The markers keep their order, and the pass sees no marker.
@@ -340,6 +427,72 @@ def live(work):
           f"live: break on {sum3[0]}:{sum3[1]} stops in Sum3, got: {out[-400:]}")
     check(re.search(r'#1\s+0x[0-9a-f]+ in _main \(\) at debug_test\.cow:\d+', out) is not None,
           f"live: bt shows _main as the caller, got: {out[-400:]}")
+    live_vars(work, cpmemu)
+
+
+def tag_lines(path):
+    tags = {}
+    with open(path) as fh:
+        for no, ln in enumerate(fh, 1):
+            m = re.search(r'# @(\w+)', ln)
+            if m:
+                tags[m.group(1)] = no
+    return tags
+
+
+def udb(work, dbg, com, cpmemu, cmds):
+    r = run([sys.executable, '-m', 'um80.udb80', dbg, '--run', f'{cpmemu} {com}', '--batch']
+            + [a for c in cmds for a in ('-ex', c)], work)
+    return r.stdout + r.stderr
+
+
+def live_vars(work, cpmemu):
+    """6. print each kind of variable at a known value."""
+    shutil.copy(os.path.join(TESTS, 'vars_test.cow'), work)
+    mac, rel, com, err = build(work, ['vars_test.cow'], ['-g'], 'lv')
+    if not com:
+        check(False, f"live vars: build: {err}")
+        return
+    t = tag_lines(os.path.join(TESTS, 'vars_test.cow'))
+    cmds = [f"break vars_test.cow:{t['inner']}", 'continue', 'info args', 'info locals',
+            'print g8', 'print gu8', 'print g16', 'print gu16', 'print g32',
+            'print gu32', 'print gb', 'print gc', 'print gnums', 'print gbox',
+            'print gval', 'print gtext', 'print gptr', 'print *gptr', 'print ginit',
+            'print gbox.next->tag', 'print gcb', 'print gneg32', 'print lpt', 'print larr[2]', 'print a + b',
+            'frame 1', 'info locals', 'info args', 'print oloc', 'print obox.hi.y',
+            'print larr', 'frame 2', 'print res', 'quit']
+    out = udb(work, 'lv.dbg', 'lv.com', cpmemu, cmds)
+    for want in ('a = 3', 'b = 105', 'c = 7', 'lpt = {x = 11, y = 22}', 'loc16 = 1000',
+                 'loc8 = -3', '= -5 ', '= 200 ', '= -1234', '= 54321', '= 30000',
+                 '= 60000', '= 4242', '= {10, 20, 30, 40}',
+                 '{lo = {x = 1, y = 2}, hi = {x = 3, y = 4}, tag = 5',
+                 '{as_word = 4660, as_byte = 52', '"hello"', '(struct Point *) 0x',
+                 '{x = 3, y = 4}', '(void (*)(void)) 0x', '<CbTarget>', '= 65531', '= 108', 'oloc = 105', 'n = 5',
+                 'No symbol "larr" in the current context'):
+        check(want in out, f"live vars: output has {want!r}, got: {out[-1500:]}")
+    check(out.count('= 105') >= 3 and re.search(r'= 6\n', out) and '= 3 ' in out,
+          "live vars: a caller's variables print in frame 1")
+    check(re.search(r'\$\d+ = 0\n', out) is not None,
+          "live vars: res is 0 before Outer returns, in frame 2")
+    # a parameter is not available before the copy
+    out = udb(work, 'lv.dbg', 'lv.com', cpmemu, ['break Inner', 'continue', 'info args', 'quit'])
+    check(out.count('<not available>') == 3, f"live vars: params before the copy, got: {out[-300:]}")
+    # workspace sharing: the same address, the right name for each routine
+    for f in ('vw_main.cow', 'vw_lib.cow', 'lib.coh'):
+        shutil.copy(os.path.join(TESTS, 'vars_ws', f.replace('vw_', '')), os.path.join(work, f))
+    mac, rel, com, err = build(work, ['vw_main.cow', 'vw_lib.cow'], ['-g'], 'lw')
+    if not com:
+        check(False, f"live vars ws: build: {err}")
+        return
+    t = tag_lines(os.path.join(TESTS, 'vars_ws', 'lib.cow'))
+    out = udb(work, 'lw.dbg', 'lw.com', cpmemu,
+              [f"break vw_lib.cow:{t['a']}", f"break vw_lib.cow:{t['b']}", 'continue',
+               'info locals', 'info args', 'print a1', 'print b1', 'continue', 'info locals',
+               'print bbuf', 'print a1', 'print counter', 'quit'])
+    for want in ('a2 = 20', 'n = 10', 'b1 = 25', 'bbuf = ',
+                 'No symbol "b1" in the current context',
+                 'No symbol "a1" in the current context', '= 1\n'):
+        check(want in out, f"live vars ws: output has {want!r}, got: {out[-1200:]}")
 
 
 def main():
@@ -352,6 +505,7 @@ def main():
         print(f"D2: {n} builds with and without -g gave the same bytes"
               if not failures else "D2: failures")
         markers_and_coverage(work, progs)
+        variables(work, progs)
         unit()
         live(work)
     print(f"debug_info_check: {passed} passed, {len(failures)} failed")

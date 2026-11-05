@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 import os
 from . import ast
 from . import debugmarks
+from . import varinfo
 from .types import (
     TypeChecker, CowType, IntType, PtrType, ArrayType, RecordType,
     InterfaceType, INT8, UINT8, INT16, UINT16, INT32, UINT32, INTPTR,
@@ -94,6 +95,11 @@ class CodeGenerator:
         self.debug_info: bool = False
         self._dbg_files: Dict[str, int] = {}   # path -> file number (1 and up)
         self._dbg_last: Optional[Tuple[int, int, bool]] = None  # last ;#line written
+        # Variable records (-g), written after the last text pass: varinfo.py
+        self.var_records: List[varinfo.VarRecord] = []
+        self.type_writer: Optional[varinfo.TypeWriter] = None
+        self._sub_info: Dict[str, Tuple[int, int, Optional[int]]] = {}
+        self._cur_label: Optional[str] = None   # label of the routine in progress
 
     def invalidate_regs(self) -> None:
         """Invalidate register tracking (after calls, jumps, etc)."""
@@ -351,6 +357,43 @@ class CodeGenerator:
             return
         self.output.append(f";#endfunc {name}")
         self._dbg_last = None
+
+    def note_var(self, name: str, typ: CowType, node, loc, kind: str,
+                 is_local: bool, param_copy: bool = False) -> None:
+        """-g: remember a variable for the ;#var markers.  The markers are
+        written after the last text pass (add_var_markers)."""
+        if not self.debug_info or self.type_writer is None:
+            return
+        key = self._var_key(name, is_local)
+        var = self.variables.get(key)
+        if var is None:
+            return
+        file_no = self.dbg_file_no(loc.filename)
+        sub = self._cur_label if is_local else None
+        scope = None
+        if sub is not None:
+            info = self._sub_info.get(sub)
+            if info and info[2]:
+                scope = (file_no, loc.line, info[2])
+        if isinstance(var.type, ArrayType) and var.type.size == 0:
+            elem = self.type_size(var.type.element) or 1
+            typ = ArrayType(var.type.element, var.size // elem)
+        self.var_records.append(varinfo.VarRecord(
+            name=name,
+            type_text=self.type_writer.text(typ, node),
+            kind=kind,
+            label=self.mangle_var_key(key),
+            ws_offset=var.offset if self.call_graph else None,
+            sub=sub,
+            decl=(file_no, loc.line),
+            scope=scope,
+            param_copy=param_copy))
+
+    def add_var_markers(self, asm: str, stats=None) -> str:
+        """-g: write the ;#type and ;#var markers into the final text."""
+        if not self.debug_info or self.type_writer is None:
+            return asm
+        return varinfo.add_markers(asm, self.var_records, self.type_writer, stats)
 
     def dbg_file_table(self) -> List[str]:
         """The ;#file lines, one for each file that a marker names."""
@@ -1341,6 +1384,8 @@ class CodeGenerator:
             # Variables declared inside a subroutine are locals
             is_local = self.current_sub is not None
             var = self.allocate_var(stmt.name, var_type, is_local=is_local)
+            self.note_var(stmt.name, var_type, stmt.type, stmt.location,
+                          'local' if is_local else 'global', is_local)
 
         # Generate initialization if present (even for pre-allocated globals)
         if stmt.init:
@@ -1893,6 +1938,11 @@ class CodeGenerator:
         else:
             self.emit_label(mangled_name)
         self.dbg_func(mangled_name, decl.location)
+        self._cur_label = mangled_name
+        if self.debug_info:
+            self._sub_info[mangled_name] = (
+                self.dbg_file_no(decl.location.filename), decl.location.line,
+                decl.end_line)
         # The prologue (copy the parameters) has the line of the declaration.
         self.dbg_line(decl.location)
 
@@ -1900,9 +1950,12 @@ class CodeGenerator:
         # These are locals, so they can share space with non-concurrent subs
         for param_name, param_type in params:
             self.allocate_var(param_name, param_type, is_local=True)
+            self.note_var(param_name, param_type, None, decl.location, 'param',
+                          True, param_copy=True)
 
         for ret_name, ret_type in returns:
             self.allocate_var(ret_name, ret_type, is_local=True)
+            self.note_var(ret_name, ret_type, None, decl.location, 'local', True)
 
         # Determine if we use register calling convention:
         # - 1 param that fits in HL: passed in HL
@@ -2009,9 +2062,12 @@ class CodeGenerator:
                 self.gen_sub(nested_sub)
 
         self.current_sub = None
+        self._cur_label = None
 
     def gen_program(self, program: ast.Program) -> str:
         """Generate complete program."""
+        if self.debug_info:
+            self.type_writer = varinfo.TypeWriter(self.checker, program)
         # Analyze for inlining opportunities before code generation
         self.analyze_for_inlining(program)
 
@@ -2051,6 +2107,8 @@ class CodeGenerator:
                 var_info = self.checker.current_scope.lookup_var(stmt.name)
                 if var_info:
                     self.allocate_var(stmt.name, var_info.type)
+                    self.note_var(stmt.name, var_info.type, stmt.type,
+                                  stmt.location, 'global', False)
 
         # Process declarations (subroutines)
         for decl in program.declarations:
@@ -2998,7 +3056,7 @@ class CodeGenerator:
 
 
 def generate(program: ast.Program, checker: TypeChecker, library_mode: bool = False,
-             debug_info: bool = False) -> str:
+             debug_info: bool = False, return_generator: bool = False):
     """Generate assembly from AST.
 
     Args:
@@ -3006,8 +3064,12 @@ def generate(program: ast.Program, checker: TypeChecker, library_mode: bool = Fa
         checker: The type checker with symbol information
         library_mode: If True, generate a library module without main entry point
         debug_info: If True, write ;# debug marker comments (-g)
+        return_generator: If True, return (text, generator).  With -g the
+            caller then runs the generator's add_var_markers on the text
+            after its last pass (the ;#var markers, varinfo.py).
     """
     gen = CodeGenerator(checker)
     gen.library_mode = library_mode
     gen.debug_info = debug_info
-    return gen.gen_program(program)
+    asm = gen.gen_program(program)
+    return (asm, gen) if return_generator else asm

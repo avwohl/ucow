@@ -1,0 +1,4 @@
+# Forward declarations for vars_ws
+
+@decl sub process_a(n: uint16);
+@decl sub process_b(n: uint16);
